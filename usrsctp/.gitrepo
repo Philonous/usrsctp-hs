@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/git-commands/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/sctplab/usrsctp.git
+	branch = 0.9.5.0
+	commit = 07f871bda23943c43c9e74cc54f25130459de830
+	parent = f8b62fab2e1762e929085352423a7c0499b7696a
+	method = merge
+	cmdver = 0.4.1
