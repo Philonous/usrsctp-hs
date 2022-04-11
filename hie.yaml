@@ -1,0 +1,8 @@
+cradle:
+  stack:
+    - path: "./src"
+      component: "usrsctp:lib"
+    - path: "./test-suite"
+      component: "usrsctp:test:tests"
+    - path: "./app"
+      component: "usrsctp:exe:usrsctp"
