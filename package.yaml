@@ -4,6 +4,24 @@ synopsis: An example project
 description: An example project
 maintainer: Philipp Balzarek
 
+c-sources:
+  - usrsctp/usrsctplib/**/*.c
+
+extra-source-files:
+  - usrsctp/usrsctplib/**/*.h
+
+include-dirs:
+  - usrsctp/usrsctplib
+
+cc-options:
+  - -O2
+  - -DSCTP_PROCESS_LEVEL_LOCKS
+  - -DSCTP_SIMPLE_ALLOCATOR
+  - -D__Userspace__
+  - -fPIC
+  - -pthread
+  - -Wno-address-of-packed-member
+
 dependencies:
   - base
   - aeson
@@ -14,6 +32,8 @@ dependencies:
   - lens
   - mtl
   - text
+  - network >= 3.1.2.0
+  - template-haskell
 
 default-extensions:
   - ApplicativeDo
@@ -58,27 +78,12 @@ ghc-options:
     - -Werror=incomplete-uni-patterns
     - -Werror=incomplete-record-updates
 
-executables:
-  usrsctp:
-    dependencies:
-    - usrsctp
-    ghc-options:
-    - -rtsopts
-    - -threaded
-    - -with-rtsopts=-N
-    - -Wall
-    main: Main.hs
-    source-dirs: app
-    extra-source-files:
-    - CHANGELOG.md
-    - LICENSE.md
-    - README.md
-    - package.yaml
-    - stack.yaml
 
 library:
   dependencies:
   - base
+  - bytestring
+  - inline-c
   source-dirs: src
 
 tests:

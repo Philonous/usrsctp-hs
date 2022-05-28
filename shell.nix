@@ -4,5 +4,8 @@ stdenv.mkDerivation {
   name = "usrsctp";
   buildInputs = [ stack
                   gnumake
+                  libtool
+                  autoconf
+                  automake
                 ];
 }

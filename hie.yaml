@@ -6,3 +6,7 @@ cradle:
       component: "usrsctp:test:tests"
     - path: "./app"
       component: "usrsctp:exe:usrsctp"
+
+dependencies:
+  - src/FFI.chs
+  - src/Structs.hsc
