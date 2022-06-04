@@ -28,7 +28,6 @@ import Structs
 {# typedef size_t CSize #}
 
 
-
 type WriteCallback = Ptr () -> Ptr Word8 -> CSize -> Word8 -> Word8 -> IO CSize
 
 foreign import ccall safe "Bindings.chs.h usrsctp_init"
@@ -56,8 +55,13 @@ conninput connection bytes len =
 
 {#pointer *socket as Socket newtype #}
 
-socket domain tp protocol =
-  {#call usrsctp_socket #} domain tp protocol nullFunPtr nullFunPtr 0 nullPtr
+aF_CONN :: CInt
+aF_CONN = {#const AF_CONN #}
+
+socket domain (GeneralSocketType tp) =
+  {#call usrsctp_socket #} domain tp ipprotoSctp nullFunPtr nullFunPtr 0 nullPtr
+  where
+    ipprotoSctp = 132 -- {#const IPPROTO_SCTP #}
 
 {#fun usrsctp_bind as bind {`Socket', withSockAddrLen* `SockAddr'&}
   -> `Int' 'throwErrnoOnMinus1 "usrsctp_bind"'*- #}
@@ -88,6 +92,46 @@ deregisterAddress = {# call usrsctp_deregister_address #}
 
 {# fun usrsctp_setsockopt as setsockopt {`Socket', `CInt', `CInt', `Ptr ()', `CUInt'}
   -> `Int' 'throwErrnoOnMinus1 "usrsctp_setsockopt"'*- #}
+
+{# fun usrsctp_getsockopt as getsockopt {`Socket', `CInt', `CInt', `Ptr ()', `CUInt'}
+  -> `Int' 'throwErrnoOnMinus1 "usrsctp_setsockopt"'*- #}
+
+{# fun usrsctp_set_non_blocking as setNonBlocking {`Socket', `Bool'}
+  -> `Int' 'throwErrnoOnMinus1 "usrsctp_set_non_blocking"'*- #}
+
+{# fun usrsctp_shutdown as shutdown {`Socket', `CInt'}
+  -> `Int' 'throwErrnoOnMinus1 "usrsctp_shutdown"'*- #}
+
+{# enum define SppFlag
+  { SPP_HB_ENABLE       as SPP_HB_ENABLE
+  , SPP_HB_DISABLE      as SPP_HB_DISABLE
+  , SPP_HB_DEMAND       as SPP_HB_DEMAND
+  , SPP_PMTUD_ENABLE    as SPP_PMTUD_ENABLE
+  , SPP_PMTUD_DISABLE   as SPP_PMTUD_DISABLE
+  , SPP_HB_TIME_IS_ZERO as SPP_HB_TIME_IS_ZERO
+  , SPP_IPV6_FLOWLABEL  as SPP_IPV6_FLOWLABEL
+  , SPP_DSCP            as SPP_DSCP
+  } #}
+
+{# fun usrsctp_finish as finish {} -> `Int' #}
+
+type UpcallCallback = Socket -> Ptr () -> CInt -> IO ()
+
+foreign import ccall "wrapper"
+  mkUpcallCallback :: UpcallCallback -> IO (FunPtr (UpcallCallback))
+
+setUpcall = {#call usrsctp_set_upcall #}
+
+eventRead = {#const SCTP_EVENT_READ #}
+eventWrite = {#const SCTP_EVENT_WRITE #}
+
+{#enum define SctpEvent
+  { SCTP_EVENT_READ as  SctpEventRead
+  , SCTP_EVENT_WRITE as SctpEventWrite
+  , SCTP_EVENT_ERROR as SctpEventError
+  } #}
+
+getEvents = {#call usrsctp_get_events #}
 
 --------------------------------------------------------------------------------
 --  Helpers --------------------------------------------------------------------

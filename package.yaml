@@ -86,6 +86,14 @@ library:
   - inline-c
   source-dirs: src
 
+executables:
+  app:
+    main: Main.hs
+    dependencies:
+      - usrsctp
+      - network
+    source-dirs: app
+
 tests:
   tests:
     dependencies:
