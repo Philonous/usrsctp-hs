@@ -86,6 +86,13 @@ sendv = {# call sendv #}
 
 recvv = {# call usrsctp_recvv #}
 
+{#enum define RecvvInfotype
+  { SCTP_RECVV_NOINFO  as RecvvNoinfo
+  , SCTP_RECVV_RCVINFO as RecvvRcvinfo
+  , SCTP_RECVV_NXTINFO as RecvvNxtinfo
+  , SCTP_RECVV_RN      as RecvvRN
+  } #}
+
 registerAddress = {# call usrsctp_register_address #}
 deregisterAddress = {# call usrsctp_deregister_address #}
 

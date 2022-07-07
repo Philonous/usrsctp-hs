@@ -4,23 +4,6 @@ synopsis: An example project
 description: An example project
 maintainer: Philipp Balzarek
 
-c-sources:
-  - usrsctp/usrsctplib/**/*.c
-
-extra-source-files:
-  - usrsctp/usrsctplib/**/*.h
-
-include-dirs:
-  - usrsctp/usrsctplib
-
-cc-options:
-  - -O2
-  - -DSCTP_PROCESS_LEVEL_LOCKS
-  - -DSCTP_SIMPLE_ALLOCATOR
-  - -D__Userspace__
-  - -fPIC
-  - -pthread
-  - -Wno-address-of-packed-member
 
 dependencies:
   - base
@@ -85,6 +68,24 @@ library:
   - bytestring
   - inline-c
   source-dirs: src
+  c-sources:
+    - usrsctp/usrsctplib/**/*.c
+
+  extra-source-files:
+    - usrsctp/usrsctplib/**/*.h
+
+  include-dirs:
+    - usrsctp/usrsctplib
+
+  cc-options:
+    - -O2
+    - -DSCTP_PROCESS_LEVEL_LOCKS
+    - -DSCTP_SIMPLE_ALLOCATOR
+    - -D__Userspace__
+    - -fPIC
+    - -pthread
+    - -Wno-address-of-packed-member
+
 
 executables:
   app:
@@ -102,6 +103,7 @@ tests:
     - tasty
     - tasty-hedgehog
     - tasty-hspec
+    - hspec
     ghc-options:
     - -rtsopts
     - -threaded

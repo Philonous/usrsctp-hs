@@ -1,62 +1,92 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StrictData #-}
 
 module Sctp where
 
 import           Data.Bits
-import           Data.ByteString        (ByteString)
-import qualified Data.ByteString        as BS
-import           Data.ByteString.Unsafe (unsafeUseAsCStringLen)
-import qualified Data.Foldable          as Foldable
-import           Data.List              (foldl')
+import           Data.ByteString          (ByteString)
+import qualified Data.ByteString          as BS
+import           Data.ByteString.Internal as BS
+import           Data.ByteString.Unsafe   (unsafeUseAsCStringLen, unsafePackCStringLen)
+import qualified Data.Foldable            as Foldable
+import           Data.List                (foldl')
 import           Foreign.C
 import           Foreign.Ptr
 import           System.IO
 
-import           Data.Coerce            (coerce)
+import           Data.Coerce              (coerce)
 import           Data.IORef
 import           Data.Word
-import qualified Foreign.C.Types        as C
+import qualified Foreign.C.Types          as C
 import           Foreign.ForeignPtr
-import           Foreign.Marshal.Alloc  (allocaBytes, alloca)
-import           Foreign.Marshal.Utils  (with)
+import           Foreign.Marshal.Alloc    (allocaBytes, alloca, mallocBytes)
+import           Foreign.Marshal.Utils    (with)
 import           Foreign.Ptr
-import           Foreign.Storable       (poke, peek, sizeOf, Storable)
+import           Foreign.Storable         (poke, peek, sizeOf, Storable)
 
-import qualified Foreign.C.Error        as CError
+import qualified Foreign.C.Error          as CError
 
-import           Network.Socket         hiding (setSocketOption, getSocketOption)
-import           Network.Socket.Address (SocketAddress(..))
+import           Network.Socket           hiding (setSocketOption, getSocketOption)
+import           Network.Socket.Address   (SocketAddress(..))
 
 import qualified FFI
 import qualified Settings
 import qualified SocketOptions
 
+run :: IO ()
+run = return ()
 
-
--- recvTest = do
---   let target = SockAddrInet 6000 (tupleToHostAddress (127,0,0,1))
---   s <- socket AF_INET Datagram defaultProtocol
---   bind s target
-
---   FFI.init (\_ bytes len _ _ ->
---                fromIntegral <$> sendBufTo s bytes (fromIntegral len) target
---            )
---   defaultSettings
---   sock <- FFI.socket FFI.aF_CONN Stream
---   defaultSocketOpts sock
---   putStrLn "Setup done"
---   allocaBytes 4096 $ \buf ->
---     forever $ do
---       (read, addr) <- recvFrom s ptr 4096
+testFlag :: Bits a => a -> a -> Bool
+testFlag x y = x .&. y /= zeroBits
 
 data SctpSocket = SctpSocket
   { sockRaw :: FFI.Socket
   , sockPendingRecvCount :: IORef Int
   , sockPendingFlushCount :: IORef Int
+  , sockRecvBuffer :: Ptr Word8
+  , sockRecvBufferSize :: Int
+  , sockDownstreamSend :: Ptr Word8 -> Int -> IO Int
+  , sockDownstreamRecv :: Ptr Word8 -> Int -> IO Int
   }
 
-sctpSocket = do
+data RecvFlags = RecvFlags
+  { recvFlagEor :: Bool
+  , recvFlagNotification :: Bool
+  }
+
+toRecvFlags flg =
+  RecvFlags
+  { recvFlagEor          = testFlag FFI.recvvFlagMsgEor flg
+  , recvFlagNotification = testFlag FFI.recvvFlagMsgNotification flg
+  }
+
+sockReadBuf :: SctpSocket -> Int -> Ptr Word8 -> IO (Int, (FFI.RcvInfo, RecvFlags))
+sockReadBuf SctpSocket{..} buffSize buffer = go
+  where
+    go = do
+      haveData <- atomicModifyIORef' sockPendingRecvCount $
+        \c -> if c > 0
+               then (c - 1, True)
+               else (0, False)
+
+      if haveData
+      then (do
+        (read, info, flags) <- recvv sockRaw buffSize buffer
+        return (read, (info, toRecvFlags flags))
+       )
+      else (do
+        received <- sockDownstreamRecv sockRecvBuffer sockRecvBufferSize
+        FFI.conninput (intPtrToPtr 0) sockRecvBuffer (fromIntegral received)
+        go
+        )
+
+-- -- sockRead :: SctpSocket -> Int -> IO ByteString
+-- sockRead sock buffSize = do
+--   (bs, flags) <- BS.createUptoN' buffSize $ sockReadBuf sock buffSize
+--   case
+
+sctpSocket dSend dRecv = do
   sock <- FFI.socket FFI.aF_CONN Stream
   defaultSocketOpts sock (1280 - 8 - 40) -- UDP, IPv6
   pendingRecvCount <- newIORef 0
@@ -68,11 +98,24 @@ sctpSocket = do
           FFI.SctpEventWrite -> modifyIORef pendingFlushCount (+1)
           _ -> return ()
   setUpcall sock upcallHandler
+  let bufferSize = 65536
+  buffer <- mallocBytes bufferSize
   return
     SctpSocket{ sockRaw = sock
               , sockPendingRecvCount = pendingRecvCount
               , sockPendingFlushCount = pendingFlushCount
+              , sockRecvBuffer = buffer
+              , sockRecvBufferSize = bufferSize
+              , sockDownstreamSend = dSend
+              , sockDownstreamRecv = dRecv
               }
+
+udpToSctp address s = do
+  sctpSocket (\buf size -> sendBufTo s buf size address )
+    (\buf bufSize -> do
+        (cnt, _) <- recvBufFrom s buf bufSize
+        return cnt
+    )
 
 -- rcv pull SctpSocket{..} = do
 --   pendingRcvs <- readIORef sockPendingRecvCount
@@ -81,26 +124,25 @@ sctpSocket = do
 
 --   return ()
 
+-- recvTest target = do
+--   let target = SockAddrInet 6000 (tupleToHostAddress (127,0,0,1))
+--   s <- socket AF_INET Datagram defaultProtocol
+--   bind s target
 
+--   FFI.init (\_ bytes len _ _ ->
+--                fromIntegral <$> sendBufTo s bytes (fromIntegral len) target
+--            )
+--   defaultSettings
 
-recv_test target = allocaBytes buffsize $ \buffer ->  do
-  let target = SockAddrInet 6000 (tupleToHostAddress (127,0,0,1))
-  s <- socket AF_INET Datagram defaultProtocol
-  bind s target
-
-  FFI.init (\_ bytes len _ _ ->
-               fromIntegral <$> sendBufTo s bytes (fromIntegral len) target
-           )
-  defaultSettings
-
-  FFI.registerAddress (intPtrToPtr 0)
-  putStrLn "Setup done"
-  go buffer s
-  where
-    go buffer socket = do
-        (received, from) <- recvBufFrom socket buffer buffsize
-        FFI.conninput (intPtrToPtr 0) buffer (fromIntegral received)
-    buffsize = 2 ^ (16 :: Int) :: Int
+--   FFI.registerAddress (intPtrToPtr 0)
+--   putStrLn "Setup done"
+--   socket <- udpToSctp target s
+--   go socket
+--   where
+--     go socket = do
+--         bs <- sockRead socket 4096
+--         BS.putStr bs
+--     buffsize = 2 ^ (16 :: Int) :: Int
 
 data Reliability = Reliable
                  | ReXMit Int -- Try X retransmissions
@@ -125,19 +167,25 @@ sendv socket bytes info flags =
                    (fromIntegral $ sizeOf (undefined :: FFI.SendvSpa))
                    (fromIntegral FFI.infoTypeSpa) flags
 
-recv socket recvBufferLen =
+
+recvv :: FFI.Socket -> Int -> Ptr Word8 -> IO (Int, FFI.RcvInfo, FFI.RcvFlags)
+recvv socket recvBufferLen recvBuffer =
   with (fromIntegral $ sizeOf (undefined :: FFI.SockAddrStorage)) $ \fromLenPtr ->
   with 0 $ \infoTypePtr ->
   with 0 $ \msgFlagsPtr ->
-  with (fromIntegral $ sizeOf (undefined :: FFI.RcvInfo)) $ \recvInfoLenPtr ->
-  alloca $ \(recvInfoBuffer :: Ptr FFI.RcvInfo)->
-  allocaBytes recvBufferLen $ \recvBuffer -> do
-    FFI.recvv socket recvBuffer (fromIntegral recvBufferLen)
-      nullPtr -- received sockaddr
-      fromLenPtr -- in/out: length of receivedSockedLen
-      (castPtr recvInfoBuffer)
-      recvInfoLenPtr
-      infoTypePtr msgFlagsPtr -- TODO
+  with (fromIntegral $ sizeOf (undefined :: FFI.Rcvinfo)) $ \recvInfoLenPtr ->
+  alloca $ \(recvInfoBuffer :: Ptr FFI.RcvInfo) -> do
+    -- TODO: this could throw EAGAIN / EWOULDBLOCK. How does it interact with upcalls?
+    received <- throwErrnoIfMinus1 "usrsctp_recvv" $
+      FFI.recvv socket (castPtr recvBuffer) (fromIntegral recvBufferLen)
+        nullPtr -- received sockaddr
+        fromLenPtr -- in/out: length of receivedSockedLen
+        (castPtr recvInfoBuffer)
+        recvInfoLenPtr
+        infoTypePtr msgFlagsPtr
+    rcvinfo <- peek recvInfoBuffer
+    flags <- peek msgFlagsPtr
+    return (fromIntegral received, rcvinfo, FFI.RcvFlags flags)
 
 setSocketOption socket (SockOpt level name) value = do
   with value $ \ptr ->
@@ -155,11 +203,14 @@ setUpcall socket cb = do
 
 getEvents socket = do
   evMask <- FFI.getEvents socket
-  return (if evMask .|. fromEnum FFI.SctpEventRead /= 0
-    then (FFI.SctpEventRead:) else Prelude.id)
-    $  (if evMask .|. fromEnum FFI.SctpEventWrite /= 0
-          then (FFI.SctpEventWrite:) else Prelude.id)
+  return $ (if evMask .|. fromEvent FFI.SctpEventRead /= 0
+           then (FFI.SctpEventRead:) else Prelude.id)
+          $  (if evMask .|. fromEvent FFI.SctpEventWrite /= 0
+            then (FFI.SctpEventWrite:) else Prelude.id)
     []
+    where
+      fromEvent :: FFI.SctpEvent -> CInt
+      fromEvent x = fromIntegral $ fromEnum x
 
 --------------------------------------------------------------------------------
 -- Default settings ------------------------------------------------------------
@@ -210,7 +261,7 @@ defaultSettings = do
     -- Heartbeat interval
     Settings.sysctlSetHeartbeatIntervalDefault 10000 -- ms
 
-subscribeEvent socket event =
+subscribeEvent socket (FFI.EventType event) =
   setSocketOption socket SocketOptions.sctpEvent
     FFI.Event { eventSeAssocId = FFI.allAssoc
                   , eventSeOn = 1
@@ -235,11 +286,11 @@ defaultSocketOpts socket mtu = do
   debug "sctpRecvrcvinfo"
   setSocketOption socket SocketOptions.sctpRecvrcvinfo (1 :: CInt)
   debug "assocChange"
-  subscribeEvent socket FFI.assocChange
+  subscribeEvent socket FFI.eventAssocChange
   debug "senderDryEvent"
-  subscribeEvent socket FFI.senderDryEvent
+  subscribeEvent socket FFI.eventSenderDryEvent
   debug "streamResetEvent"
-  subscribeEvent socket FFI.streamResetEvent
+  subscribeEvent socket FFI.eventStreamResetEvent
 
   debug "nodelay"
   setSocketOption socket SocketOptions.sctpNodelay (1 :: CInt)

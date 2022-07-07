@@ -4,5 +4,5 @@ import Network.Socket
 
 main :: IO ()
 main = do
-  _ <- Sctp.test1
+  _ <- Sctp.run
   return ()

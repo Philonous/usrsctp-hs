@@ -13,6 +13,8 @@ import Network.Socket.Address (pokeSocketAddress, peekSocketAddress)
 
 #include "usrsctp.h"
 
+
+
 --------------------------------------------------------------------------------
 -- Dealing With SockAddr -------------------------------------------------------
 --------------------------------------------------------------------------------
@@ -140,38 +142,6 @@ currentAssoc = #{const SCTP_CURRENT_ASSOC}
 allAssoc :: #{type sctp_assoc_t}
 allAssoc = #{const SCTP_ALL_ASSOC}
 
--- Notification Types
-
-assocChange :: Word16
-assocChange                = #{const SCTP_ASSOC_CHANGE                }
-peerAddrChange :: Word16
-peerAddrChange             = #{const SCTP_PEER_ADDR_CHANGE            }
-remoteError :: Word16
-remoteError                = #{const SCTP_REMOTE_ERROR                }
-sendFailed :: Word16
-sendFailed                 = #{const SCTP_SEND_FAILED                 }
-shutdownEvent :: Word16
-shutdownEvent              = #{const SCTP_SHUTDOWN_EVENT              }
-adaptationIndication :: Word16
-adaptationIndication       = #{const SCTP_ADAPTATION_INDICATION       }
-partialDeliveryEvent :: Word16
-partialDeliveryEvent       = #{const SCTP_PARTIAL_DELIVERY_EVENT      }
-authenticationEvent :: Word16
-authenticationEvent        = #{const SCTP_AUTHENTICATION_EVENT        }
-streamResetEvent :: Word16
-streamResetEvent           = #{const SCTP_STREAM_RESET_EVENT          }
-senderDryEvent :: Word16
-senderDryEvent             = #{const SCTP_SENDER_DRY_EVENT            }
-notificationsStoppedEvent :: Word16
-notificationsStoppedEvent  = #{const SCTP_NOTIFICATIONS_STOPPED_EVENT }
-assocResetEvent :: Word16
-assocResetEvent            = #{const SCTP_ASSOC_RESET_EVENT           }
-streamChangeEvent :: Word16
-streamChangeEvent          = #{const SCTP_STREAM_CHANGE_EVENT         }
-sendFailedEvent :: Word16
-sendFailedEvent            = #{const SCTP_SEND_FAILED_EVENT           }
-
-
 -- struct sctp_assoc_value
 data AssocValue = AssocValue
   { assocValueAssocId :: #{type sctp_assoc_t}
@@ -277,3 +247,240 @@ instance Storable Initmsg where
     #{poke struct sctp_initmsg, sinit_max_instreams} ptr initmsgSinitMaxInstreams
     #{poke struct sctp_initmsg, sinit_max_attempts} ptr initmsgSinitMaxAttempts
     #{poke struct sctp_initmsg, sinit_max_init_timeo} ptr initmsgSinitMaxInitTimeo
+
+--------------------------------------------------------------------------------
+-- recvv -----------------------------------------------------------------------
+--------------------------------------------------------------------------------
+
+-- struct sctp_rcvinfo
+data Rcvinfo = Rcvinfo
+  { rcvinfoRcvSid :: #{type uint16_t}
+  , rcvinfoRcvSsn :: #{type uint16_t}
+  , rcvinfoRcvFlags :: #{type uint16_t}
+  , rcvinfoRcvPpid :: #{type uint32_t}
+  , rcvinfoRcvTsn :: #{type uint32_t}
+  , rcvinfoRcvCumtsn :: #{type uint32_t}
+  , rcvinfoRcvContext :: #{type uint32_t}
+  , rcvinfoRcvAssocId :: #{type sctp_assoc_t}
+  }
+
+instance Storable Rcvinfo where
+  sizeOf _ = #size struct sctp_rcvinfo
+  alignment _ =  #alignment struct sctp_rcvinfo
+  peek ptr = do
+    rcvinfoRcvSid <- #{peek struct sctp_rcvinfo, rcv_sid} ptr
+    rcvinfoRcvSsn <- #{peek struct sctp_rcvinfo, rcv_ssn} ptr
+    rcvinfoRcvFlags <- #{peek struct sctp_rcvinfo, rcv_flags} ptr
+    rcvinfoRcvPpid <- #{peek struct sctp_rcvinfo, rcv_ppid} ptr
+    rcvinfoRcvTsn <- #{peek struct sctp_rcvinfo, rcv_tsn} ptr
+    rcvinfoRcvCumtsn <- #{peek struct sctp_rcvinfo, rcv_cumtsn} ptr
+    rcvinfoRcvContext <- #{peek struct sctp_rcvinfo, rcv_context} ptr
+    rcvinfoRcvAssocId <- #{peek struct sctp_rcvinfo, rcv_assoc_id} ptr
+    return Rcvinfo{..}
+  poke ptr Rcvinfo{..} = do
+    #{poke struct sctp_rcvinfo, rcv_sid} ptr rcvinfoRcvSid
+    #{poke struct sctp_rcvinfo, rcv_ssn} ptr rcvinfoRcvSsn
+    #{poke struct sctp_rcvinfo, rcv_flags} ptr rcvinfoRcvFlags
+    #{poke struct sctp_rcvinfo, rcv_ppid} ptr rcvinfoRcvPpid
+    #{poke struct sctp_rcvinfo, rcv_tsn} ptr rcvinfoRcvTsn
+    #{poke struct sctp_rcvinfo, rcv_cumtsn} ptr rcvinfoRcvCumtsn
+    #{poke struct sctp_rcvinfo, rcv_context} ptr rcvinfoRcvContext
+    #{poke struct sctp_rcvinfo, rcv_assoc_id} ptr rcvinfoRcvAssocId
+
+
+-- struct sctp_nxtinfo
+data Nxtinfo = Nxtinfo
+  { nxtinfoNxtSid :: #{type uint16_t}
+  , nxtinfoNxtFlags :: #{type uint16_t}
+  , nxtinfoNxtPpid :: #{type uint32_t}
+  , nxtinfoNxtLength :: #{type uint32_t}
+  , nxtinfoNxtAssocId :: #{type sctp_assoc_t}
+  }
+
+instance Storable Nxtinfo where
+  sizeOf _ = #size struct sctp_nxtinfo
+  alignment _ =  #alignment struct sctp_nxtinfo
+  peek ptr = do
+    nxtinfoNxtSid <- #{peek struct sctp_nxtinfo, nxt_sid} ptr
+    nxtinfoNxtFlags <- #{peek struct sctp_nxtinfo, nxt_flags} ptr
+    nxtinfoNxtPpid <- #{peek struct sctp_nxtinfo, nxt_ppid} ptr
+    nxtinfoNxtLength <- #{peek struct sctp_nxtinfo, nxt_length} ptr
+    nxtinfoNxtAssocId <- #{peek struct sctp_nxtinfo, nxt_assoc_id} ptr
+    return Nxtinfo{..}
+  poke ptr Nxtinfo{..} = do
+    #{poke struct sctp_nxtinfo, nxt_sid} ptr nxtinfoNxtSid
+    #{poke struct sctp_nxtinfo, nxt_flags} ptr nxtinfoNxtFlags
+    #{poke struct sctp_nxtinfo, nxt_ppid} ptr nxtinfoNxtPpid
+    #{poke struct sctp_nxtinfo, nxt_length} ptr nxtinfoNxtLength
+    #{poke struct sctp_nxtinfo, nxt_assoc_id} ptr nxtinfoNxtAssocId
+
+-- struct sctp_recvv_rn
+data RecvvRn = RecvvRn
+  { recvvRnRecvvRcvinfo :: Rcvinfo
+  , recvvRnRecvvNxtinfo :: Nxtinfo
+  }
+
+instance Storable RecvvRn where
+  sizeOf _ = #size struct sctp_recvv_rn
+  alignment _ =  #alignment struct sctp_recvv_rn
+  peek ptr = do
+    recvvRnRecvvRcvinfo <- #{peek struct sctp_recvv_rn, recvv_rcvinfo} ptr
+    recvvRnRecvvNxtinfo <- #{peek struct sctp_recvv_rn, recvv_nxtinfo} ptr
+    return RecvvRn{..}
+  poke ptr RecvvRn{..} = do
+    #{poke struct sctp_recvv_rn, recvv_rcvinfo} ptr recvvRnRecvvRcvinfo
+    #{poke struct sctp_recvv_rn, recvv_nxtinfo} ptr recvvRnRecvvNxtinfo
+
+--------------------------------------------------------------------------------
+-- Notificaitons ---------------------------------------------------------------
+--------------------------------------------------------------------------------
+
+-- notification types
+
+newtype EventType = EventType Word16
+  deriving (Show, Eq, Bits)
+
+eventAssocChange :: EventType
+eventAssocChange = EventType #{const SCTP_ASSOC_CHANGE}
+eventPeerAddrChange :: EventType
+eventPeerAddrChange = EventType #{const SCTP_PEER_ADDR_CHANGE}
+eventRemoteError :: EventType
+eventRemoteError = EventType #{const SCTP_REMOTE_ERROR}
+eventSendFailed :: EventType
+eventSendFailed = EventType #{const SCTP_SEND_FAILED}
+eventShutdownEvent :: EventType
+eventShutdownEvent = EventType #{const SCTP_SHUTDOWN_EVENT}
+eventAdaptationIndication :: EventType
+eventAdaptationIndication = EventType #{const SCTP_ADAPTATION_INDICATION}
+eventPartialDeliveryEvent :: EventType
+eventPartialDeliveryEvent = EventType #{const SCTP_PARTIAL_DELIVERY_EVENT}
+eventAuthenticationEvent :: EventType
+eventAuthenticationEvent = EventType #{const SCTP_AUTHENTICATION_EVENT}
+eventStreamResetEvent :: EventType
+eventStreamResetEvent = EventType #{const SCTP_STREAM_RESET_EVENT}
+eventSenderDryEvent :: EventType
+eventSenderDryEvent = EventType #{const SCTP_SENDER_DRY_EVENT}
+eventNotificationsStoppedEvent :: EventType
+eventNotificationsStoppedEvent = EventType #{const SCTP_NOTIFICATIONS_STOPPED_EVENT}
+eventAssocResetEvent :: EventType
+eventAssocResetEvent = EventType #{const SCTP_ASSOC_RESET_EVENT}
+eventStreamChangeEvent :: EventType
+eventStreamChangeEvent = EventType #{const SCTP_STREAM_CHANGE_EVENT}
+eventSendFailedEvent :: EventType
+eventSendFailedEvent = EventType #{const SCTP_SEND_FAILED_EVENT}
+
+newtype RcvFlags = RcvFlags CInt deriving (Eq,Bits)
+
+recvvFlagMsgNotification = RcvFlags #{const MSG_NOTIFICATION}
+recvvFlagMsgEor = RcvFlags #{const MSG_EOR}
+
+
+-- union sctp_notification
+data Notification
+  = NotificationAssocChange AssocChange
+  | NotificationSenderDryEvent SenderDryEvent
+  | NotificationStreamResetEvent StreamResetEvent
+  | Other Word16 -- ^ not implemented
+
+
+instance Storable Notification where
+  sizeOf _ = #size union sctp_notification
+  alignment _ = #alignment union sctp_notification
+  peek ptr = do
+    tp <- #{ peek struct sctp_tlv, sn_type } ptr :: IO Word16
+    case tp  of
+      eventAssocChange -> NotificationAssocChange <$> peek (castPtr ptr)
+      eventSenderDryEvent -> NotificationSenderDryEvent
+                                          <$> peek (castPtr ptr)
+      eventStremResetEvent -> NotificationStreamResetEvent
+                                           <$> peek (castPtr ptr)
+      _ -> return $ Other tp
+  poke _ _ = error "Storable.poke for union sctp_notification: not implemented"
+
+-- struct sctp_assoc_change
+---------------------------
+data AssocChange = AssocChange
+  { assocChangeSacType :: #{type uint16_t}
+  , assocChangeSacFlags :: #{type uint16_t}
+  , assocChangeSacLength :: #{type uint32_t}
+  , assocChangeSacState :: #{type uint16_t}
+  , assocChangeSacError :: #{type uint16_t}
+  , assocChangeSacOutboundStreams :: #{type uint16_t}
+  , assocChangeSacInboundStreams :: #{type uint16_t}
+  , assocChangeSacAssocId :: #{type sctp_assoc_t}
+  }
+
+instance Storable AssocChange where
+  sizeOf _ = #size struct sctp_assoc_change
+  alignment _ =  #alignment struct sctp_assoc_change
+  peek ptr = do
+    assocChangeSacType <- #{peek struct sctp_assoc_change, sac_type} ptr
+    assocChangeSacFlags <- #{peek struct sctp_assoc_change, sac_flags} ptr
+    assocChangeSacLength <- #{peek struct sctp_assoc_change, sac_length} ptr
+    assocChangeSacState <- #{peek struct sctp_assoc_change, sac_state} ptr
+    assocChangeSacError <- #{peek struct sctp_assoc_change, sac_error} ptr
+    assocChangeSacOutboundStreams <- #{peek struct sctp_assoc_change, sac_outbound_streams} ptr
+    assocChangeSacInboundStreams <- #{peek struct sctp_assoc_change, sac_inbound_streams} ptr
+    assocChangeSacAssocId <- #{peek struct sctp_assoc_change, sac_assoc_id} ptr
+    return AssocChange{..}
+  poke ptr AssocChange{..} = do
+    #{poke struct sctp_assoc_change, sac_type} ptr assocChangeSacType
+    #{poke struct sctp_assoc_change, sac_flags} ptr assocChangeSacFlags
+    #{poke struct sctp_assoc_change, sac_length} ptr assocChangeSacLength
+    #{poke struct sctp_assoc_change, sac_state} ptr assocChangeSacState
+    #{poke struct sctp_assoc_change, sac_error} ptr assocChangeSacError
+    #{poke struct sctp_assoc_change, sac_outbound_streams} ptr assocChangeSacOutboundStreams
+    #{poke struct sctp_assoc_change, sac_inbound_streams} ptr assocChangeSacInboundStreams
+    #{poke struct sctp_assoc_change, sac_assoc_id} ptr assocChangeSacAssocId
+
+-- struct sctp_sender_dry_event
+-------------------------------
+data SenderDryEvent = SenderDryEvent
+  { senderDryEventSenderDryType :: #{type uint16_t}
+  , senderDryEventSenderDryFlags :: #{type uint16_t}
+  , senderDryEventSenderDryLength :: #{type uint32_t}
+  , senderDryEventSenderDryAssocId :: #{type sctp_assoc_t}
+  }
+
+instance Storable SenderDryEvent where
+  sizeOf _ = #size struct sctp_sender_dry_event
+  alignment _ =  #alignment struct sctp_sender_dry_event
+  peek ptr = do
+    senderDryEventSenderDryType <- #{peek struct sctp_sender_dry_event, sender_dry_type} ptr
+    senderDryEventSenderDryFlags <- #{peek struct sctp_sender_dry_event, sender_dry_flags} ptr
+    senderDryEventSenderDryLength <- #{peek struct sctp_sender_dry_event, sender_dry_length} ptr
+    senderDryEventSenderDryAssocId <- #{peek struct sctp_sender_dry_event, sender_dry_assoc_id} ptr
+    return SenderDryEvent{..}
+  poke ptr SenderDryEvent{..} = do
+    #{poke struct sctp_sender_dry_event, sender_dry_type} ptr senderDryEventSenderDryType
+    #{poke struct sctp_sender_dry_event, sender_dry_flags} ptr senderDryEventSenderDryFlags
+    #{poke struct sctp_sender_dry_event, sender_dry_length} ptr senderDryEventSenderDryLength
+    #{poke struct sctp_sender_dry_event, sender_dry_assoc_id} ptr senderDryEventSenderDryAssocId
+
+
+-- struct sctp_stream_reset_event
+---------------------------------
+data StreamResetEvent = StreamResetEvent
+  { streamResetEventStrresetType :: #{type uint16_t}
+  , streamResetEventStrresetFlags :: #{type uint16_t}
+  , streamResetEventStrresetLength :: #{type uint32_t}
+  , streamResetEventStrresetAssocId :: #{type sctp_assoc_t}
+  , streamResetEventStrresetStreamList :: #{type uint16_t}
+  }
+
+instance Storable StreamResetEvent where
+  sizeOf _ = #size struct sctp_stream_reset_event
+  alignment _ =  #alignment struct sctp_stream_reset_event
+  peek ptr = do
+    streamResetEventStrresetType <- #{peek struct sctp_stream_reset_event, strreset_type} ptr
+    streamResetEventStrresetFlags <- #{peek struct sctp_stream_reset_event, strreset_flags} ptr
+    streamResetEventStrresetLength <- #{peek struct sctp_stream_reset_event, strreset_length} ptr
+    streamResetEventStrresetAssocId <- #{peek struct sctp_stream_reset_event, strreset_assoc_id} ptr
+    streamResetEventStrresetStreamList <- #{peek struct sctp_stream_reset_event, strreset_stream_list} ptr
+    return StreamResetEvent{..}
+  poke ptr StreamResetEvent{..} = do
+    #{poke struct sctp_stream_reset_event, strreset_type} ptr streamResetEventStrresetType
+    #{poke struct sctp_stream_reset_event, strreset_flags} ptr streamResetEventStrresetFlags
+    #{poke struct sctp_stream_reset_event, strreset_length} ptr streamResetEventStrresetLength
+    #{poke struct sctp_stream_reset_event, strreset_assoc_id} ptr streamResetEventStrresetAssocId
+    #{poke struct sctp_stream_reset_event, strreset_stream_list} ptr streamResetEventStrresetStreamList
