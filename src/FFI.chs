@@ -7,19 +7,20 @@ module FFI
   )
 where
 
-import Data.Bits              ((.|.))
-import Data.Coerce
-import Data.Word
-import Foreign.C.Error        as CError
-import Foreign.C.Types
-import Foreign.Marshal.Alloc
-import Foreign.Marshal.Utils  (with)
-import Foreign.Ptr
-import Foreign.Storable
-import Network.Socket         hiding (Socket)
-import Network.Socket.Address (SocketAddress(..))
+import           Data.Bits              ((.|.))
+import           Data.Coerce
+import qualified Data.List              as List
+import           Data.Word
+import           Foreign.C.Error        as CError
+import           Foreign.C.Types
+import           Foreign.Marshal.Alloc
+import           Foreign.Marshal.Utils  (with)
+import           Foreign.Ptr
+import           Foreign.Storable
+import           Network.Socket         hiding (Socket)
+import           Network.Socket.Address (SocketAddress(..))
 
-import Structs
+import           Structs
 
 #include <usrsctp.h>
 
@@ -63,13 +64,25 @@ socket domain (GeneralSocketType tp) =
   where
     ipprotoSctp = 132 -- {#const IPPROTO_SCTP #}
 
-{#fun usrsctp_bind as bind {`Socket', withSockAddrLen* `SockAddr'&}
-  -> `Int' 'throwErrnoOnMinus1 "usrsctp_bind"'*- #}
+bind :: Socket -> SockaddrConn -> IO ()
+bind sock addr = with addr $ \addrPtr -> do
+  _ <- throwErrnoIfMinus1 "usrsctp_bind"
+         $ {#call usrsctp_bind #} sock (castPtr addrPtr)
+                                  (fromIntegral $ sizeOf addr)
+  return ()
+
+-- {#fun usrsctp_bind as bind {`Socket', with* `SockaddrConn'&}
+--   -> `Int' 'throwErrnoOnMinus1 "usrsctp_bind"'*- #}
 
 {#fun usrsctp_close as close {`Socket'} -> `()' #}
-{#fun usrsctp_connect as connect {`Socket', withSockAddrLen* `SockAddr'&}
-  -> `Int' 'throwErrnoOnMinus1 "usrsctp_connect"'*- #}
 
+connect :: Socket -> SockaddrConn -> IO ()
+connect sock addr = with addr $ \addrPtr -> do
+  _ <- throwErrnoIfMinus1Except "usrsctp_connect"
+         [(eINPROGRESS, return ())]
+         $ {#call usrsctp_connect#} sock (castPtr addrPtr)
+                                   (fromIntegral $ sizeOf addr)
+  return ()
 
 {#enum define Policy { SCTP_PR_SCTP_NONE as None
                      , SCTP_PR_SCTP_TTL as TTL
@@ -140,12 +153,36 @@ eventWrite = {#const SCTP_EVENT_WRITE #}
 
 getEvents = {#call usrsctp_get_events #}
 
+{#enum define SACState
+  { SCTP_COMM_UP        as SACStateCommUp
+  , SCTP_COMM_LOST      as SACStateCommLost
+  , SCTP_RESTART        as SACStateRestart
+  , SCTP_SHUTDOWN_COMP  as SACStateShutdownComp
+  , SCTP_CANT_STR_ASSOC as SACStateCantStrAssoc
+  } deriving (Show, Eq) #}
+
 --------------------------------------------------------------------------------
 --  Helpers --------------------------------------------------------------------
 --------------------------------------------------------------------------------
 
 throwErrnoOnMinus1 descr (-1) = CError.throwErrno descr
 throwErrnoOnMinus1 _ _ = return ()
+
+throwErrnoIfMinus1Except :: (Num a, Eq a) =>
+                            String
+                         -> [(Errno, IO b)]
+                         -> IO a
+                         -> IO (Either b a)
+throwErrnoIfMinus1Except descr excepts m = do
+  res <- m
+  case res of
+    (-1) -> do
+      en <- getErrno
+      case List.lookup en excepts of
+        Nothing -> throwErrno descr
+        Just k -> Left <$> k
+    _ -> return $ Right res
+
 
 withSockAddrLen :: SockAddr -> ((Ptr (), CUInt) -> IO a) -> IO a
 withSockAddrLen addr f = allocaBytes addrLen $ \addrPtr -> do

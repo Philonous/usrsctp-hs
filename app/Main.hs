@@ -1,8 +1,8 @@
-import qualified Sctp
+import qualified Run
 import Network.Socket
 
 
 main :: IO ()
 main = do
-  _ <- Sctp.run
+  _ <- Run.runMain
   return ()

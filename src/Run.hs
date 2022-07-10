@@ -10,7 +10,17 @@ module Run
     ) where
 
 import           Control.Lens
+import           System.Environment
+import           System.Exit
 
+import qualified Sctp
 
 runMain :: IO ()
-runMain = putStrLn "usrsctp!"
+runMain = do
+  args <- getArgs
+  case args of
+    ["recv"] -> Sctp.recvTest
+    ["send"] -> Sctp.sendTest
+    _ -> do
+      putStrLn "Usage: $0 {recv|send}"
+      exitFailure

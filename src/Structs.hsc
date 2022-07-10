@@ -6,7 +6,7 @@ import Data.Word
 import Foreign.C.Types
 import Foreign.Storable
 import Data.Bits
-import Foreign.Ptr (castPtr)
+import Foreign.Ptr (castPtr, Ptr)
 import Network.Socket   (SockAddr(..))
 import Network.Socket.Address (pokeSocketAddress, peekSocketAddress)
 
@@ -27,6 +27,36 @@ instance Storable SockAddrStorage where
   poke _ (SockAddrStorage SockAddrUnix{}) = error "poke SockAddrUnix not supported"
   poke ptr (SockAddrStorage addr) = pokeSocketAddress ptr addr
   peek ptr = SockAddrStorage <$> peekSocketAddress (castPtr ptr)
+
+-- struct sockaddr_conn
+data SockaddrConn = SockaddrConn
+  { -- sockaddrConnSconnFamily :: #{type uint16_t}
+    -- Family is always AF_CONN
+    sockaddrConnSconnPort :: #{type uint16_t}
+  , sockaddrConnSconnAddr :: Ptr () -- ^ Opaque value, but can't be null!bSct
+  }
+
+foreign import ccall unsafe "arpa/inet.h htons" htons :: Word16 -> Word16
+foreign import ccall unsafe "arpa/inet.h ntohs" ntohs :: Word16 -> Word16
+
+instance Storable SockaddrConn where
+  sizeOf _ = #size struct sockaddr_conn
+  alignment _ =  #alignment struct sockaddr_conn
+  peek ptr = do
+    -- Family is always AF_CONN
+    -- sockaddrConnSconnFamily <- #{peek struct sockaddr_conn, sconn_family} ptr
+    sockaddrConnSconnPort <- ntohs <$> #{peek struct sockaddr_conn, sconn_port} ptr
+    sockaddrConnSconnAddr <- #{peek struct sockaddr_conn, sconn_addr} ptr
+    return SockaddrConn{..}
+  poke ptr SockaddrConn{..} = do
+    #{poke struct sockaddr_conn, sconn_family} ptr
+      (#{const AF_CONN} :: #{type uint16_t})
+    #{poke struct sockaddr_conn, sconn_port} ptr (htons sockaddrConnSconnPort)
+    #{poke struct sockaddr_conn, sconn_addr} ptr sockaddrConnSconnAddr
+
+--------------------------------------------------------------------------------
+-- SndInfo ---------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 data SndInfo = SndInfo
    { sndInfoSid :: Word16
@@ -115,7 +145,7 @@ data RcvInfo = RcvInfo
   , rcvInfoCumtsn  :: Word32
   , rcvInfoContext :: Word32
   , rcvInfoAssocId :: Word32
-  }
+  } deriving Show
 
 instance Storable RcvInfo where
   sizeOf _ = #size struct sctp_rcvinfo
