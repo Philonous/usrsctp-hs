@@ -2,18 +2,15 @@
 
 module Structs where
 
+import Data.Bits
 import Data.Word
 import Foreign.C.Types
+import Foreign.Ptr            (castPtr, Ptr)
 import Foreign.Storable
-import Data.Bits
-import Foreign.Ptr (castPtr, Ptr)
-import Network.Socket   (SockAddr(..))
+import Network.Socket         (SockAddr(..))
 import Network.Socket.Address (pokeSocketAddress, peekSocketAddress)
 
-
 #include "usrsctp.h"
-
-
 
 --------------------------------------------------------------------------------
 -- Dealing With SockAddr -------------------------------------------------------
@@ -419,10 +416,10 @@ instance Storable Notification where
   peek ptr = do
     tp <- #{ peek struct sctp_tlv, sn_type } ptr :: IO Word16
     case tp  of
-      eventAssocChange -> NotificationAssocChange <$> peek (castPtr ptr)
-      eventSenderDryEvent -> NotificationSenderDryEvent
+      #{const SCTP_ASSOC_CHANGE} -> NotificationAssocChange <$> peek (castPtr ptr)
+      #{const SCTP_SENDER_DRY_EVENT} -> NotificationSenderDryEvent
                                           <$> peek (castPtr ptr)
-      eventStremResetEvent -> NotificationStreamResetEvent
+      #{const SCTP_STREAM_RESET_EVENT} -> NotificationStreamResetEvent
                                            <$> peek (castPtr ptr)
       _ -> return $ Other tp
   poke _ _ = error "Storable.poke for union sctp_notification: not implemented"
@@ -438,7 +435,7 @@ data AssocChange = AssocChange
   , assocChangeSacOutboundStreams :: #{type uint16_t}
   , assocChangeSacInboundStreams :: #{type uint16_t}
   , assocChangeSacAssocId :: #{type sctp_assoc_t}
-  }
+  } deriving (Show)
 
 instance Storable AssocChange where
   sizeOf _ = #size struct sctp_assoc_change

@@ -34,9 +34,15 @@ type WriteCallback = Ptr () -> Ptr Word8 -> CSize -> Word8 -> Word8 -> IO CSize
 foreign import ccall safe "Bindings.chs.h usrsctp_init"
   usrsctp_init :: CUShort -> FunPtr WriteCallback -> FunPtr () -> IO ()
 
+foreign import ccall safe "init_debug"
+  usrsctp_init_debug :: CUShort -> FunPtr WriteCallback -> IO ()
+
 foreign import ccall "wrapper"
   mkWriteCallback :: WriteCallback -> IO (FunPtr WriteCallback)
 
+
+-- NB: The conn-send callback MUST return 0 on successful send, NOT the number
+-- ob bytes sent! Any other value is interpreted as an error
 init :: FFI.WriteCallback -> IO ()
 init callback = do
   callbackPtr <- mkWriteCallback callback
@@ -44,6 +50,13 @@ init callback = do
     0 -- Set UDP port to 0 to disable UDP encapsulation
     callbackPtr
     nullFunPtr
+
+initDebug :: FFI.WriteCallback -> IO ()
+initDebug callback = do
+  callbackPtr <- mkWriteCallback callback
+  usrsctp_init_debug
+    0 -- Set UDP port to 0 to disable UDP encapsulation
+    callbackPtr
 
 
 conninput :: Ptr () -- ^ This pointer is only used to identify the connection and
@@ -160,6 +173,12 @@ getEvents = {#call usrsctp_get_events #}
   , SCTP_SHUTDOWN_COMP  as SACStateShutdownComp
   , SCTP_CANT_STR_ASSOC as SACStateCantStrAssoc
   } deriving (Show, Eq) #}
+
+{# enum define SctpDebug
+  { SCTP_DEBUG_NONE as DebugNone
+  , SCTP_DEBUG_ALL as DebugAll
+  }
+#}
 
 --------------------------------------------------------------------------------
 --  Helpers --------------------------------------------------------------------

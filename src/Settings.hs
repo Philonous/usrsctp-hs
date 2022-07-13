@@ -102,4 +102,5 @@ $( let underScoreToCamel [] = []
         ,"sctp_use_dccc_ecn"
         ,"sctp_buffer_splitting"
         ,"sctp_initial_cwnd"
+        ,"sctp_debug_on"
         ])

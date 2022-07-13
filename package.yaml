@@ -71,7 +71,7 @@ library:
   source-dirs: src
   c-sources:
     - usrsctp/usrsctplib/**/*.c
-
+    - cbits/*.c
   extra-source-files:
     - usrsctp/usrsctplib/**/*.h
 
@@ -82,6 +82,7 @@ library:
     - -O2
     - -DSCTP_PROCESS_LEVEL_LOCKS
     - -DSCTP_SIMPLE_ALLOCATOR
+    - -DSCTP_DEBUG
     - -D__Userspace__
     - -fPIC
     - -pthread

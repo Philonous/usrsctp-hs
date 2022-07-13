@@ -4,13 +4,21 @@
 
 module SctpPacket where
 
-import           Control.Applicative (some)
-import           Control.Monad       (replicateM)
+import           Control.Applicative (some, many)
+import           Control.Monad       (when, replicateM, guard)
 import           Data.ByteString     (ByteString)
 import qualified Data.ByteString     as BS
 import qualified Data.List           as List
 import           Data.Serialize
 import           Data.Word
+import           Numeric             (showHex)
+
+paddingFor :: Word16 -> Get ()
+paddingFor len = do
+    let padLength = (4 - (fromIntegral len `mod` 4)) `mod` 4
+    _padding <- getByteString padLength
+    return ()
+
 
 data SctpPacketHeader =
   SctpPacketHeader
@@ -48,8 +56,7 @@ getChunk = do
     chunkLength <- getWord16be
     -- Chunk length includes the 4 header bytes
     chunkValue <- getByteString (fromIntegral chunkLength - 4)
-    let padLength = (4 - (fromIntegral chunkLength `mod` 4)) `mod` 4
-    _padding <- getByteString padLength
+    paddingFor chunkLength
     return Chunk{..}
 
 getSctpPacketHeader = do
@@ -112,11 +119,64 @@ getSack = do
   return SACK{..}
 
 --------------------------------------------------------------------------------
+-- INIT Chunk ------------------------------------------------------------------
+--------------------------------------------------------------------------------
+newtype Hex a = Hex a
+
+instance (Integral a, Show a) => Show (Hex a) where
+  show (Hex a) = "0x" ++ showHex a ""
+
+newtype HexBS = HexBS ByteString
+
+instance Show HexBS where
+  show (HexBS bs) = "0x" ++ BS.foldr hex "" bs
+    where
+      hex w | w < 16 = ('0':) . showHex w
+            | otherwise = showHex w
+
+data INIT = INIT
+  { initiateTag :: Word32
+  , initARwnd :: Word32
+  , initOStreams :: Word16
+  , initIStreams :: Word16
+  , initTsn :: Word32
+  , initParams :: [InitParam]
+  , restBs :: HexBS
+  } deriving Show
+
+getInit = do
+  initiateTag <- getWord32be
+  initARwnd <- getWord32be
+  initOStreams <- getWord16be
+  initIStreams <- getWord16be
+  initTsn <- getWord32be
+  let initParams = []
+  initParams <- many getInitParam
+
+  restBs <- HexBS <$> (remaining >>= getByteString)
+  -- guard $ rest == 0
+  return INIT{..}
+
+data InitParam = InitParam
+  { tp :: Hex Word16
+  , contents :: HexBS
+  } deriving Show
+
+getInitParam = do
+  tp <- Hex <$> getWord16be
+  initParamLen <- getWord16be
+  contents <- HexBS <$> (getByteString $ fromIntegral initParamLen - 4)
+  r <- remaining
+  when (r > 0) $ paddingFor initParamLen
+  return InitParam{..}
+
+--------------------------------------------------------------------------------
 -- Pretty Printing -------------------------------------------------------------
 --------------------------------------------------------------------------------
 
 ppChunkContents 0 = show <$> getUserData
 ppChunkContents 3 = show <$> getSack
+ppChunkContents 1 = show <$> getInit
 ppChunkContents _ = return ""
 
 

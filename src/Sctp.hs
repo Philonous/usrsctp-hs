@@ -122,8 +122,8 @@ sockRead sock buffSize = BS.createUptoN' buffSize $ sockReadBuf sock buffSize
 
 handleNotification :: FFI.Notification -> IO ()
 handleNotification (FFI.NotificationAssocChange
-                     FFI.AssocChange{FFI.assocChangeSacState = state}) =
-  debug $ "Notification: AssocChange (" ++ (show $ (toEnum $ fromIntegral state :: FFI.SACState)) ++ ")"
+                     asc@FFI.AssocChange{FFI.assocChangeSacState = state}) =
+  debug $ "Notification: AssocChange (" ++ (show (toEnum $ fromIntegral state :: FFI.SACState)) ++ "; " ++ show asc ++ ")"
 handleNotification FFI.NotificationSenderDryEvent{} = debug "Notification: SenderDryEvent"
 handleNotification FFI.NotificationStreamResetEvent{} = debug "Notification: StreamReset"
 handleNotification (FFI.Other other) = debug $ "Notification: Unknown (" ++ show other ++ ")"
@@ -221,6 +221,8 @@ connect SctpSocket{..} addr port =
       , sockaddrConnSconnAddr = intPtrToPtr addr
       }
 
+debugCont = hPutStr stderr
+
 debug str = do
   hPutStrLn stderr str
   hFlush stderr
@@ -234,11 +236,14 @@ recvTest = do
   Socket.bind s local
 
   debug "init"
-  FFI.init (\_ bytes len _ _ -> do
-               debug $ "raw send: " ++ show len
-               debugPacket "packet= " bytes (fromIntegral len)
-               fromIntegral <$> Socket.sendBufTo s bytes (fromIntegral len) remote
-           )
+  FFI.initDebug
+      (\_ bytes len _ _ -> do
+          debugCont $ "raw send: " ++ show len ++ " -> "
+          sent <- fromIntegral <$> Socket.sendBufTo s bytes (fromIntegral len) remote
+          debug $ show sent
+          debugPacket "packet= " bytes (fromIntegral len)
+          return $ if fromIntegral sent < len then (-1) else 0
+      )
   defaultSettings
 
   debug "registerAddress"
@@ -255,7 +260,7 @@ recvTest = do
       (bs, (info, flags)) <- recv socket 4096
       debug $ "Info: " ++ show info
       debug $ "Flags: " ++ show flags
-      BS.putStrLn bs
+      debug $ "Content: " ++ show bs
       go socket
     buffsize = 2 ^ (16 :: Int) :: Int
 
@@ -268,12 +273,14 @@ sendTest = do
   Socket.bind s local
 
   debug "init"
-  FFI.init (\_ bytes len _ _ -> do
-               debug $ "raw send: " ++ show len
-               debugPacket "packet= " bytes (fromIntegral len)
-               sent <- Socket.sendBufTo s bytes (fromIntegral len) remote
-               return $ fromIntegral sent
-           )
+  FFI.initDebug
+      (\_ bytes len _ _ -> do
+          debugCont $ "raw send: " ++ show len ++ " -> "
+          sent <- Socket.sendBufTo s bytes (fromIntegral len) remote
+          debug $ show sent
+          debugPacket "packet= " bytes (fromIntegral len)
+          return $ if fromIntegral sent < len then (-1) else 0
+      )
   defaultSettings
 
   debug "registerAddress"
@@ -293,7 +300,15 @@ sendTest = do
   where
     go n socket = do
       let bs = "Hullo: " <> (Text.encodeUtf8 . Text.pack $ show n)
-      sent <- sendv socket bs (FFI.SendvSpa Nothing Nothing Nothing) 0
+      let sndInfo =
+            FFI.SndInfo
+            { FFI.sndInfoSid = 17
+            , FFI.sndInfoFlags = 0
+            , FFI.sndInfoPpid = 1
+            , FFI.sndInfoContext = 0
+            , FFI.sndInfoAssocId = 0
+            }
+      sent <- sendv socket bs (FFI.SendvSpa (Just sndInfo) Nothing Nothing) 0
       putStrLn $ "Sent " ++ show sent ++ " bytes"
       threadDelay 3000000
       go (n+1) socket
@@ -380,6 +395,7 @@ getEvents socket = do
 --------------------------------------------------------------------------------
 
 defaultSettings = do
+    Settings.sysctlSetDebugOn $ (fromIntegral $ fromEnum FFI.DebugAll)
     Settings.sysctlSetRecvspace $ 1024 * 1024
     Settings.sysctlSetSendspace $ 1024 * 1024
 
