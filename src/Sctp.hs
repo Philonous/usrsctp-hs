@@ -5,7 +5,8 @@
 
 module Sctp where
 
-import           Control.Concurrent       (threadDelay, forkIO)
+import           Control.Concurrent       ( threadDelay, forkIO
+                                          , MVar, takeMVar, tryPutMVar, newEmptyMVar)
 import           Control.Concurrent.Async
 import           Control.Monad            (forever, unless)
 import qualified Control.Monad.Catch      as Ex
@@ -55,17 +56,22 @@ testFlag x y = x .&. y /= zeroBits
 
 data SctpSocket = SctpSocket
   { sockRaw :: FFI.Socket
-  , sockPendingRecvCount :: IORef Int
-  , sockPendingFlushCount :: IORef Int
+  -- Buffer to move data from downstream connection to usrsctp
   , sockRecvBuffer :: Ptr Word8
   , sockRecvBufferSize :: Int
   , sockDownstreamSend :: Ptr Word8 -> Int -> IO Int
   , sockDownstreamRecv :: Ptr Word8 -> Int -> IO Int
+  -- Buffer for assembling partially received notifications
   , sockNotificationBuffer :: IORef [ByteString]
+  -- recv and send should block when usrsctp isn't ready, sempahores are filled
+  -- when usrsctp signals availability via upcall
+  , sockReceiveSem :: MVar ()
+  , sockSendSem :: MVar ()
   }
 
 data RecvFlags = RecvFlags
-  { recvFlagEor :: Bool
+  { -- Last fragment of this chunk
+    recvFlagEor :: Bool
   , recvFlagNotification :: Bool
   } deriving Show
 
@@ -93,33 +99,6 @@ debugPacket prefix ptr len = do
       else (show (BS.take 90 bs) ++ " (" ++ show (BS.length bs - 90) ++ " bytes elided)")
 
 
-sockReadBuf :: SctpSocket -> Int -> Ptr Word8 -> IO (Int, (FFI.RcvInfo, RecvFlags))
-sockReadBuf SctpSocket{..} buffSize buffer = go
-  where
-    go =
-      recvv sockRaw buffSize buffer >>= \case
-        Nothing -> do
-           threadDelay 300000 -- @TODO ???
-           go
-        Just (read, info, flags) -> return (read, (info, toRecvFlags flags))
-
-  -- where
-  --   go = do
-  --     haveData <- atomicModifyIORef' sockPendingRecvCount $ \c -> (0, c > 0)
-  --     if haveData
-  --     then (do
-  --       (read, info, flags) <- recvv sockRaw buffSize buffer
-  --       return (read, (info, toRecvFlags flags))
-  --      )
-  --     else (do
-  --       threadDelay 10000 -- @TODO ???
-  --       go
-  --       )
-
-sockRead :: SctpSocket -> Int -> IO (ByteString, (FFI.RcvInfo, RecvFlags))
-sockRead sock buffSize = BS.createUptoN' buffSize $ sockReadBuf sock buffSize
-
-
 handleNotification :: FFI.Notification -> IO ()
 handleNotification (FFI.NotificationAssocChange
                      asc@FFI.AssocChange{FFI.assocChangeSacState = state}) =
@@ -128,44 +107,66 @@ handleNotification FFI.NotificationSenderDryEvent{} = debug "Notification: Sende
 handleNotification FFI.NotificationStreamResetEvent{} = debug "Notification: StreamReset"
 handleNotification (FFI.Other other) = debug $ "Notification: Unknown (" ++ show other ++ ")"
 
-recv sock buffsize = do
-  res@(bytes, (info, flags)) <- sockRead sock buffsize
-  case recvFlagNotification flags of
-    False -> return res
-    True -> do
-      modifyIORef (sockNotificationBuffer sock) $ (bytes :)
-      case recvFlagEor flags of
-        False -> return ()
-        True -> do
-          parts <- readIORef (sockNotificationBuffer sock)
-          writeIORef (sockNotificationBuffer sock) []
-          notification <-
-            unsafeUseAsCStringLen (BS.concat $ List.reverse parts)
-              $ \(ptr, _len) -> peek (castPtr ptr)
-          handleNotification notification
-      recv sock buffsize
+-- trySockRead :: SctpSocket -> Int -> IO (Maybe (ByteString, (FFI.RcvInfo, RecvFlags)))
+-- trySockRead sock buffSize = BS.createAndTrim' buffSize $ \buffer -> do
+--   (len, info) <- trySockReadBuf sock buffSize buffer
+--   return (0, len, info)
+
+sockRead sock buffsize = BS.createAndTrim' buffsize readBuffer
+  where
+    readBuffer buffer = do
+      trySockReadBuf sock buffsize buffer >>= \case
+        Nothing -> do
+          -- wait for more input
+          takeMVar $ sockReceiveSem sock
+          readBuffer buffer
+        Just (read, info) -> return (0, read, info)
+
+
+recv sock buffsize = go
+  where
+    go buffer = do
+      res@(bytes, (info, rawFlags)) <- sockRead sock buffsize
+      let flags = toRecvFlags rawFlags
+      if recvFlagNotification flags
+        then return res
+        else (do
+          modifyIORef (sockNotificationBuffer sock) (bytes :)
+          case recvFlagEor flags of
+            False -> return ()
+            True -> do
+              parts <- readIORef (sockNotificationBuffer sock)
+              writeIORef (sockNotificationBuffer sock) []
+              notification <-
+                unsafeUseAsCStringLen (BS.concat $ List.reverse parts)
+                  $ \(ptr, _len) -> peek (castPtr ptr)
+              handleNotification notification
+          go buffer)
 
 
 sctpSocket dSend dRecv = do
   sock <- FFI.socket FFI.aF_CONN Socket.Stream
   defaultSocketOpts sock (1280 - 8 - 40) -- UDP, IPv6
-  pendingRecvCount <- newIORef 0
-  pendingFlushCount <- newIORef 0
+  receiveSem <- newEmptyMVar
+  sendSem <- newEmptyMVar
   let upcallHandler s _flags = do
         debug "Upcall"
         events <- getEvents s
         Foldable.for_ events $ \case
           FFI.SctpEventRead -> do
             debug "Events: read"
-            modifyIORef pendingRecvCount (+1)
+            _ <- tryPutMVar receiveSem ()
+            return ()
           FFI.SctpEventWrite -> do
             debug "Events: write"
-            modifyIORef pendingFlushCount (+1)
+            _ <- tryPutMVar sendSem ()
+            return ()
           _ -> return ()
   setUpcall sock upcallHandler
   let bufferSize = 65536
   buffer <- mallocBytes bufferSize
   notificationBuffer <- newIORef []
+
 
   -- TODO, threads need to be handled properly
   forkIO $ forever $
@@ -179,16 +180,15 @@ sctpSocket dSend dRecv = do
                    FFI.conninput (intPtrToPtr 1) buffer (fromIntegral received)
                )
 
-
   return
     SctpSocket{ sockRaw = sock
-              , sockPendingRecvCount = pendingRecvCount
-              , sockPendingFlushCount = pendingFlushCount
               , sockRecvBuffer = buffer
               , sockRecvBufferSize = bufferSize
               , sockDownstreamSend = dSend
               , sockDownstreamRecv = dRecv
               , sockNotificationBuffer = notificationBuffer
+              , sockReceiveSem = receiveSem
+              , sockSendSem = sendSem
               }
 
 udpToSctp address s = do
@@ -341,8 +341,8 @@ sendv socket bytes info flags =
                        (fromIntegral FFI.infoTypeSpa) flags
 
 
-recvv :: FFI.Socket -> Int -> Ptr Word8 -> IO (Maybe (Int, FFI.RcvInfo, FFI.RcvFlags))
-recvv socket recvBufferLen recvBuffer =
+trySockReadBuf :: SctpSocket -> Int -> Ptr Word8 -> IO (Maybe (Int, (FFI.RcvInfo, FFI.RcvFlags)))
+trySockReadBuf SctpSocket{sockRaw = socket} recvBufferLen recvBuffer =
   with (fromIntegral $ sizeOf (undefined :: FFI.SockAddrStorage)) $ \fromLenPtr ->
   with 0 $ \infoTypePtr ->
   with 0 $ \msgFlagsPtr ->
@@ -363,7 +363,9 @@ recvv socket recvBufferLen recvBuffer =
       _ -> do
         rcvinfo <- peek recvInfoBuffer
         flags <- peek msgFlagsPtr
-        return $ Just (fromIntegral received, rcvinfo, FFI.RcvFlags flags)
+        return $ Just (fromIntegral received
+                      , ( rcvinfo
+                        , FFI.RcvFlags flags))
 
 setSocketOption socket (Socket.SockOpt level name) value = do
   with value $ \ptr ->
