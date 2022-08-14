@@ -61,7 +61,7 @@ data SndInfo = SndInfo
    , sndInfoPpid :: Word32
    , sndInfoContext :: Word32
    , sndInfoAssocId :: Word32
-   }
+   } deriving Show
 
 instance Storable SndInfo where
   sizeOf _ = #size struct sctp_sndinfo
@@ -78,7 +78,7 @@ instance Storable SndInfo where
 data PrInfo = PrInfo
   { prInfoPolicy :: Word16
   , prInfoValue :: Word32
-  }
+  } deriving Show
 
 instance Storable PrInfo where
   sizeOf _ = #size struct sctp_prinfo
@@ -89,6 +89,7 @@ instance Storable PrInfo where
   peek = error "PrInfo.peek: not implemented"
 
 data AuthInfo = AuthInfo {authInfoKeynumber :: Word16}
+  deriving Show
 
 instance Storable AuthInfo where
   sizeOf _ = #size struct sctp_authinfo
@@ -102,12 +103,17 @@ data SendvSpa = SendvSpa
   { sendvSpaSndInfo :: Maybe SndInfo
   , sendvSpaPrInfo :: Maybe PrInfo
   , sendvSpaAuthInfo :: Maybe AuthInfo
-  }
+  } deriving Show
+
+foreign import ccall unsafe "memset"
+  memset :: Ptr a -> Word8 -> CSize -> IO ()
 
 instance Storable SendvSpa where
   sizeOf _ = #size struct sctp_sendv_spa
   alignment _ = #alignment struct sctp_sendv_spa
+  peek _ = error "SendvSpa Storable.peek: not implemented"
   poke ptr SendvSpa{..} = do
+    memset ptr 0 (fromIntegral $ sizeOf (undefined :: SendvSpa))
     sndInfoValid <- case sendvSpaSndInfo of
       Just si -> do
         #{poke struct sctp_sendv_spa, sendv_sndinfo} ptr si

@@ -2,12 +2,18 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StrictData #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE UnboxedTuples #-}
 
-module Sctp where
+module Sctp
+  ( module Sctp
+  , module FFI
+  ) where
 
 import           Control.Concurrent       ( threadDelay, forkIO
                                           , MVar, takeMVar, tryPutMVar, newEmptyMVar)
 import           Control.Concurrent.Async
+import qualified Control.Concurrent.Async as Async
 import           Control.Monad            (forever, unless)
 import qualified Control.Monad.Catch      as Ex
 import           Data.Bits
@@ -16,6 +22,7 @@ import qualified Data.ByteString          as BS
 import           Data.ByteString.Internal as BS
 import           Data.ByteString.Unsafe   (unsafeUseAsCStringLen, unsafePackCStringLen)
 import qualified Data.Foldable            as Foldable
+import qualified Data.IntMap.Strict       as IMap
 import           Data.List                (foldl')
 import qualified Data.List                as List
 import           Data.Text                (Text)
@@ -26,6 +33,7 @@ import           Foreign.C.Error
 import           Foreign.Ptr
 import           System.Exit
 import           System.IO
+import           System.IO.Unsafe         (unsafePerformIO)
 
 import           Data.Coerce              (coerce)
 import           Data.IORef
@@ -43,30 +51,68 @@ import qualified Network.Socket           as Socket
 import           Network.Socket.Address   (SocketAddress(..))
 
 import qualified FFI
+import           FFI                      (init, initDebug, registerAddress
+                                          , SendvSpa(..))
+
+import           GHC.Exts                 (touch#)
+import           GHC.IO                   (IO (..))
+import           GHC.IORef                (IORef (..))
+import           GHC.STRef                (STRef (..))
+
+
 import qualified Settings
 import qualified SocketOptions
 
 import qualified SctpPacket
 
-run :: IO ()
-run = return ()
-
 testFlag :: Bits a => a -> a -> Bool
 testFlag x y = x .&. y /= zeroBits
 
-data SctpSocket = SctpSocket
-  { sockRaw :: FFI.Socket
-  -- Buffer to move data from downstream connection to usrsctp
-  , sockRecvBuffer :: Ptr Word8
-  , sockRecvBufferSize :: Int
-  , sockDownstreamSend :: Ptr Word8 -> Int -> IO Int
-  , sockDownstreamRecv :: Ptr Word8 -> Int -> IO Int
+data GlobalState =
+  GlobalState
+  { globalStateConMap :: IORef (IMap.IntMap (Ptr Word8 -> Int -> Word8 -> Word8 -> IO Bool))
+  , globalStateNextAddr :: IORef Int
+  }
+
+
+-- Initialize usersctp once and keep global state
+-- Since we can only set a single downstream send function we keep a global
+-- map of connections to send functions
+{-# NOINLINE globalState #-}
+globalState :: GlobalState
+globalState = unsafePerformIO $ do
+  map <- newIORef IMap.empty
+  let conSend addr buffer len tos setDf = do
+        let addr' = fromIntegral $ ptrToIntPtr addr
+        cons <- readIORef map
+        case IMap.lookup addr' cons of
+          Nothing -> do -- connection doesn't exist
+            debug $ "Could not find connection " ++ show addr'
+            return 1 -- failure
+          Just send -> do
+            sentSuccess <- send buffer (fromIntegral len) tos setDf
+            return $ if sentSuccess then 0 else 1
+  FFI.init conSend
+  defaultSettings
+  nextAddr <- newIORef 1
+  return $
+    GlobalState
+    { globalStateConMap = map
+    , globalStateNextAddr = nextAddr
+    }
+
+data Socket = Socket
+  { -- IORef, because we want to invalidate the socket on close
+    -- Also, we can attach a finalizer to this IORef
+    sockRaw :: IORef FFI.Socket
   -- Buffer for assembling partially received notifications
   , sockNotificationBuffer :: IORef [ByteString]
   -- recv and send should block when usrsctp isn't ready, sempahores are filled
   -- when usrsctp signals availability via upcall
-  , sockReceiveSem :: MVar ()
-  , sockSendSem :: MVar ()
+  , sockReceiveFlag :: MVar ()
+  -- , sockSendFlag :: MVar ()
+  -- Hold on to connections so they don't get harvested
+  , sockConnections :: IORef [Connection]
   }
 
 data RecvFlags = RecvFlags
@@ -95,7 +141,7 @@ debugPacket prefix ptr len = do
   where
     elided bs =
       if BS.length bs < 100
-      then (show bs)
+      then show bs
       else (show (BS.take 90 bs) ++ " (" ++ show (BS.length bs - 90) ++ " bytes elided)")
 
 
@@ -107,30 +153,27 @@ handleNotification FFI.NotificationSenderDryEvent{} = debug "Notification: Sende
 handleNotification FFI.NotificationStreamResetEvent{} = debug "Notification: StreamReset"
 handleNotification (FFI.Other other) = debug $ "Notification: Unknown (" ++ show other ++ ")"
 
--- trySockRead :: SctpSocket -> Int -> IO (Maybe (ByteString, (FFI.RcvInfo, RecvFlags)))
--- trySockRead sock buffSize = BS.createAndTrim' buffSize $ \buffer -> do
---   (len, info) <- trySockReadBuf sock buffSize buffer
---   return (0, len, info)
-
+sockRead :: Socket -> Int -> IO (ByteString, (Maybe FFI.RcvInfo, FFI.RcvFlags))
 sockRead sock buffsize = BS.createAndTrim' buffsize readBuffer
   where
     readBuffer buffer = do
       trySockReadBuf sock buffsize buffer >>= \case
         Nothing -> do
           -- wait for more input
-          takeMVar $ sockReceiveSem sock
+          takeMVar $ sockReceiveFlag sock
           readBuffer buffer
         Just (read, info) -> return (0, read, info)
 
 
+recv :: Socket -> Int -> IO (ByteString, Maybe FFI.RcvInfo, RecvFlags)
 recv sock buffsize = go
   where
-    go buffer = do
+    go = do
       res@(bytes, (info, rawFlags)) <- sockRead sock buffsize
       let flags = toRecvFlags rawFlags
-      if recvFlagNotification flags
-        then return res
-        else (do
+      case recvFlagNotification flags of
+        False -> return (bytes, info, flags)
+        True -> do
           modifyIORef (sockNotificationBuffer sock) (bytes :)
           case recvFlagEor flags of
             False -> return ()
@@ -141,84 +184,167 @@ recv sock buffsize = go
                 unsafeUseAsCStringLen (BS.concat $ List.reverse parts)
                   $ \(ptr, _len) -> peek (castPtr ptr)
               handleNotification notification
-          go buffer)
+          go
 
 
-sctpSocket dSend dRecv = do
-  sock <- FFI.socket FFI.aF_CONN Socket.Stream
-  defaultSocketOpts sock (1280 - 8 - 40) -- UDP, IPv6
-  receiveSem <- newEmptyMVar
-  sendSem <- newEmptyMVar
+socket = do
+  receiveFlag <- newEmptyMVar
+  sendFlag <- newEmptyMVar
+  connections <- newIORef []
   let upcallHandler s _flags = do
-        debug "Upcall"
+        -- debug "Upcall"
         events <- getEvents s
         Foldable.for_ events $ \case
           FFI.SctpEventRead -> do
-            debug "Events: read"
-            _ <- tryPutMVar receiveSem ()
+            -- debug "Events: read"
+            _ <- tryPutMVar receiveFlag ()
             return ()
           FFI.SctpEventWrite -> do
-            debug "Events: write"
-            _ <- tryPutMVar sendSem ()
+            -- debug "Events: write"
+            _ <- tryPutMVar sendFlag ()
             return ()
           _ -> return ()
+
+  sock <- FFI.socket FFI.aF_CONN Socket.Stream
   setUpcall sock upcallHandler
-  let bufferSize = 65536
-  buffer <- mallocBytes bufferSize
   notificationBuffer <- newIORef []
+  raw <- newIORef sock
+  let sock =
+        Socket{ sockRaw = raw
+              , sockNotificationBuffer = notificationBuffer
+              , sockReceiveFlag = receiveFlag
+              -- , sockSendFlag = sendFlag
+              , sockConnections = connections
+              }
+
+  -- Close uscrsctp socket when this Socket value goes out of scope
+  mkWeakIORef raw (close sock)
+  return sock
+
+close :: Socket -> IO ()
+close sock = do
+  invalidateSocket sock (return ()) FFI.close
+  -- Not strictly speaking necessary
+  writeIORef (sockConnections sock) []
+  where
+    invalidateSocket sock error success = do
+      cur <- atomicModifyIORef (sockRaw sock) $ \cur -> (FFI.Socket nullPtr, cur)
+      if invalid cur then error else success cur
+      where
+        invalid (FFI.Socket ptr) = ptr == nullPtr
+
+-- |
+touchSocket :: Socket -> IO ()
+touchSocket sock = do
+  touch (sockRaw sock)
+  touch (sockConnections sock)
+  where
+    -- This is stolen from the network package.
+    touch (IORef (STRef mutVar)) =
+      IO (\s -> (# touch# mutVar s, () #)) :: IO ()
 
 
+withRawSocket sock f = do
+  raw <- readIORef (sockRaw sock)
+  res <- f raw
+  touchSocket sock
+  return res
+
+
+-- | While usrsctp can send data via sockets, this isn't implemented in this
+-- library. Instead, we rely on usrsctp's ability to use send and receive
+-- callbacks. This also means that we don't care about the IP address of our
+-- peers (they are handled by the underlying transport). Instead connections are
+-- tracked via abstract handlers.
+data Connection =
+  Connection
+  { connAddr :: IORef Int
+  , connStop :: IO ()
+  }
+
+--   withRawSocket sock $ \raw ->
+    -- defaultSocketOpts raw (1280 - 8 - 40) -- UDP, IPv6
+
+
+connection send recv recvBufferSize = do
+  addr <- atomicModifyIORef (globalStateNextAddr globalState) (\x -> (x+1, x))
+  debug $ "Addr: " ++ show addr
+  FFI.registerAddress $ intPtrToPtr (fromIntegral addr)
   -- TODO, threads need to be handled properly
-  forkIO $ forever $
+  buffer <- mallocBytes recvBufferSize
+
+  atomicModifyIORef (globalStateConMap globalState)
+    $ \mp -> (IMap.insert addr send mp, ())
+
+  -- Perhaps a more "elegant" solution would be to modify recv so it checks if
+  -- data is available, and if not it calls the lower layer, which might even
+  -- properly block on an fd which the runtime can handle better. But usrsctp
+  -- can generate notifications independently of incoming data and they are
+  -- handed to the user via recv.
+  thread <- async $ forever $
     Ex.handle (\(e :: Ex.SomeException) -> do
                   debug $ "Receive thread got exception: " ++ show e
                   Ex.throwM e
               )( do
-                   received <- dRecv buffer bufferSize
-                   debug $ "raw received: " ++ show received
-                   debugPacket "packet= " buffer received
-                   FFI.conninput (intPtrToPtr 1) buffer (fromIntegral received)
+                   received <- recv buffer recvBufferSize
+                   -- debug $ "raw received: " ++ show received
+                   -- debugPacket "packet= " buffer received
+                   FFI.conninput (intPtrToPtr $ fromIntegral addr)
+                     buffer (fromIntegral received)
                )
+  let stop = do
+        uninterruptibleCancel thread
+        atomicModifyIORef (globalStateConMap globalState)
+          $ \mp ->(IMap.delete addr mp, ())
 
+  addrRef <- newIORef addr
+  -- Stop the thread when socket goes out of scope
+  _ <- mkWeakIORef addrRef stop
   return
-    SctpSocket{ sockRaw = sock
-              , sockRecvBuffer = buffer
-              , sockRecvBufferSize = bufferSize
-              , sockDownstreamSend = dSend
-              , sockDownstreamRecv = dRecv
-              , sockNotificationBuffer = notificationBuffer
-              , sockReceiveSem = receiveSem
-              , sockSendSem = sendSem
-              }
+    Connection
+    { connAddr = addrRef
+    , connStop = stop
+    }
 
-udpToSctp address s = do
-  sctpSocket (\buf size -> Socket.sendBufTo s buf size address )
+-- | Create an estalished UDP connection. This is just a helper for simple
+-- onto-to-one style connections. Real scenarios are probably more complex.
+simpleUdpConnection localAddr remoteAddr = do
+  udpSocket <- Socket.socket Socket.AF_INET Socket.Datagram Socket.defaultProtocol
+  Socket.bind udpSocket localAddr
+  Socket.connect udpSocket remoteAddr
+  connection (\buf bufsize _ _ -> do
+                 sent <- Socket.sendBuf udpSocket buf bufsize
+                 return $ sent == bufsize
+             )
     (\buf bufSize -> do
-        (cnt, _) <- Socket.recvBufFrom s buf bufSize
-        return cnt
-    )
+        Socket.recvBuf udpSocket buf bufSize
+    ) 65507 {- Maximum UDP packet size -}
 
--- rcv pull SctpSocket{..} = do
+-- rcv pull Socket{..} = do
 --   pendingRcvs <- readIORef sockPendingRecvCount
 --   if pendingRcvs > 0
 --     then recv
 
 --   return ()
 
-bind :: SctpSocket -> IntPtr -> Word16 -> IO ()
-bind SctpSocket{..} addr port =
-  FFI.bind sockRaw
+bind :: Socket -> Connection -> Word16 -> IO ()
+bind sock conn port = withRawSocket sock $ \raw -> do
+  addr <- fromIntegral <$> readIORef (connAddr conn)
+  FFI.bind raw
     FFI.SockaddrConn
       { sockaddrConnSconnPort = port
       , sockaddrConnSconnAddr = intPtrToPtr addr
       }
+  -- Keep the connection alive as long as the socket exists
+  atomicModifyIORef (sockConnections sock) (\conns -> (conn : conns, ()))
 
-connect :: SctpSocket -> IntPtr -> Word16 -> IO ()
-connect SctpSocket{..} addr port =
-  FFI.connect sockRaw
+connect :: Socket -> Connection -> Word16 -> IO ()
+connect sock conn port = withRawSocket sock $ \raw -> do
+  addr <- readIORef $ connAddr conn
+  FFI.connect raw
     FFI.SockaddrConn
       { sockaddrConnSconnPort = port
-      , sockaddrConnSconnAddr = intPtrToPtr addr
+      , sockaddrConnSconnAddr = intPtrToPtr $ fromIntegral addr
       }
 
 debugCont = hPutStr stderr
@@ -226,95 +352,6 @@ debugCont = hPutStr stderr
 debug str = do
   hPutStrLn stderr str
   hFlush stderr
-
-recvTest = do
-  let local = Socket.SockAddrInet 6000 (Socket.tupleToHostAddress (127,0,0,1))
-  let remote = Socket.SockAddrInet 6001 (Socket.tupleToHostAddress (127,0,0,1))
-  debug "Socket"
-  s <- Socket.socket Socket.AF_INET Socket.Datagram Socket.defaultProtocol
-  debug "bind"
-  Socket.bind s local
-
-  debug "init"
-  FFI.initDebug
-      (\_ bytes len _ _ -> do
-          debugCont $ "raw send: " ++ show len ++ " -> "
-          sent <- fromIntegral <$> Socket.sendBufTo s bytes (fromIntegral len) remote
-          debug $ show sent
-          debugPacket "packet= " bytes (fromIntegral len)
-          return $ if fromIntegral sent < len then (-1) else 0
-      )
-  defaultSettings
-
-  debug "registerAddress"
-  FFI.registerAddress (intPtrToPtr 1)
-  socket <- udpToSctp local s
-  debug "bind"
-  bind socket 1 5000
-  debug "connect"
-  connect socket 1 5000
-  debug "Reading"
-  go socket
-  where
-    go socket = do
-      (bs, (info, flags)) <- recv socket 4096
-      debug $ "Info: " ++ show info
-      debug $ "Flags: " ++ show flags
-      debug $ "Content: " ++ show bs
-      go socket
-    buffsize = 2 ^ (16 :: Int) :: Int
-
-sendTest = do
-  let local = Socket.SockAddrInet 6001 (Socket.tupleToHostAddress (127,0,0,1))
-  let remote = Socket.SockAddrInet 6000 (Socket.tupleToHostAddress (127,0,0,1))
-  debug "Socket"
-  s <- Socket.socket Socket.AF_INET Socket.Datagram Socket.defaultProtocol
-  debug "bind"
-  Socket.bind s local
-
-  debug "init"
-  FFI.initDebug
-      (\_ bytes len _ _ -> do
-          debugCont $ "raw send: " ++ show len ++ " -> "
-          sent <- Socket.sendBufTo s bytes (fromIntegral len) remote
-          debug $ show sent
-          debugPacket "packet= " bytes (fromIntegral len)
-          return $ if fromIntegral sent < len then (-1) else 0
-      )
-  defaultSettings
-
-  debug "registerAddress"
-  FFI.registerAddress (intPtrToPtr 1)
-  socket <- udpToSctp local s
-  debug "bind"
-  bind socket 1 5000
-  debug "connect"
-  connect socket 1 5000
-  debug "loop"
-  forkIO $ allocaBytes 4096 $ \buffer -> forever $ do
-    (bs, _) <- recv socket 4096
-    debug $ "received: "++ show bs
-    threadDelay 100000
-  threadDelay 1000000
-  go (0 :: Integer) (sockRaw socket)
-  where
-    go n socket = do
-      let bs = "Hullo: " <> (Text.encodeUtf8 . Text.pack $ show n)
-      let sndInfo =
-            FFI.SndInfo
-            { FFI.sndInfoSid = 17
-            , FFI.sndInfoFlags = 0
-            , FFI.sndInfoPpid = 1
-            , FFI.sndInfoContext = 0
-            , FFI.sndInfoAssocId = 0
-            }
-      sent <- sendv socket bs (FFI.SendvSpa (Just sndInfo) Nothing Nothing) 0
-      putStrLn $ "Sent " ++ show sent ++ " bytes"
-      threadDelay 3000000
-      go (n+1) socket
-
-
-
 
 data Reliability = Reliable
                  | ReXMit Int -- Try X retransmissions
@@ -329,26 +366,30 @@ data Message = Message
   , messageReliability :: Reliability
   }
 
-sendv :: FFI.Socket -> ByteString -> FFI.SendvSpa -> C.CInt -> IO C.CLong
-sendv socket bytes info flags =
+sendv :: Socket -> ByteString -> FFI.SendvSpa -> C.CInt -> IO C.CLong
+sendv sock bytes info flags = withRawSocket sock $ \raw ->
   unsafeUseAsCStringLen bytes $ \(ptr, len) ->
-  with info $ \infoPtr ->
+  with info $ \infoPtr -> do
+    -- debug "test"
+    -- info' <- peek infoPtr :: IO FFI.SendvSpa
+    -- debug $ "re-peeked info: " ++ show info'
     throwErrnoIfMinus1 "usrsctp_sendv" $
-      FFI.sendv socket (castPtr ptr) (fromIntegral len)
-                       nullPtr 0
-                       (castPtr infoPtr)
-                       (fromIntegral $ sizeOf (undefined :: FFI.SendvSpa))
-                       (fromIntegral FFI.infoTypeSpa) flags
+      FFI.sendv raw (castPtr ptr) (fromIntegral len)
+                    nullPtr 0
+                    (castPtr infoPtr)
+                    (fromIntegral $ sizeOf (undefined :: FFI.SendvSpa))
+                    (fromIntegral FFI.infoTypeSpa) flags
 
 
-trySockReadBuf :: SctpSocket -> Int -> Ptr Word8 -> IO (Maybe (Int, (FFI.RcvInfo, FFI.RcvFlags)))
-trySockReadBuf SctpSocket{sockRaw = socket} recvBufferLen recvBuffer =
+trySockReadBuf :: Socket -> Int -> Ptr Word8 -> IO (Maybe (Int, (Maybe FFI.RcvInfo, FFI.RcvFlags)))
+trySockReadBuf sock recvBufferLen recvBuffer =
+  withRawSocket sock $ \raw ->
   with (fromIntegral $ sizeOf (undefined :: FFI.SockAddrStorage)) $ \fromLenPtr ->
   with 0 $ \infoTypePtr ->
   with 0 $ \msgFlagsPtr ->
   with (fromIntegral $ sizeOf (undefined :: FFI.Rcvinfo)) $ \recvInfoLenPtr ->
   alloca $ \(recvInfoBuffer :: Ptr FFI.RcvInfo) -> do
-    received <- FFI.recvv socket (castPtr recvBuffer) (fromIntegral recvBufferLen)
+    received <- FFI.recvv raw (castPtr recvBuffer) (fromIntegral recvBufferLen)
         nullPtr -- received sockaddr
         fromLenPtr -- in/out: length of receivedSockedLen
         (castPtr recvInfoBuffer)
@@ -361,7 +402,15 @@ trySockReadBuf SctpSocket{sockRaw = socket} recvBufferLen recvBuffer =
           then return Nothing
           else throwErrno "usrsctp_recvv"
       _ -> do
-        rcvinfo <- peek recvInfoBuffer
+        infoType <- peek infoTypePtr
+
+        rcvinfo <- case toEnum (fromIntegral infoType) of
+                     FFI.RecvvNoinfo -> return Nothing
+                     FFI.RecvvRcvinfo -> Just <$> peek recvInfoBuffer
+                     n -> do
+                       debug "Recevied unexpected infor type"
+                       return Nothing
+
         flags <- peek msgFlagsPtr
         return $ Just (fromIntegral received
                       , ( rcvinfo
@@ -455,23 +504,16 @@ defaultSocketOpts socket mtu = do
   -- SCTP must stop sending after the lower layer is shut down, so disable
   -- linger
 
-  debug "setsocketopt: linger"
   setSocketOption socket Socket.Linger Socket.StructLinger{sl_onoff = 1, sl_linger = 0 }
-  debug "setsocketopt: sctpEnableStreamReset"
   setSocketOption socket SocketOptions.sctpEnableStreamReset
     FFI.AssocValue { assocValueAssocId = FFI.allAssoc
                        , assocValueAssocValue = 1
                        }
-  debug "setsocketopt: sctpRecvrcvinfo"
   setSocketOption socket SocketOptions.sctpRecvrcvinfo (1 :: CInt)
-  debug "setsocketopt: assocChange"
   subscribeEvent socket FFI.eventAssocChange
-  debug "setsocketopt: senderDryEvent"
   subscribeEvent socket FFI.eventSenderDryEvent
-  debug "setsocketopt: streamResetEvent"
   subscribeEvent socket FFI.eventStreamResetEvent
 
-  debug "setsocketopt: nodelay"
   setSocketOption socket SocketOptions.sctpNodelay (1 :: CInt)
 
   let paddrparams =
@@ -485,7 +527,6 @@ defaultSocketOpts socket mtu = do
         , paddrparamsSppPathmaxrxt = 0
         , paddrparamsSppDscp = 0
         }
-  debug "setsocketopt: paddrparams"
   setSocketOption socket SocketOptions.sctpPeerAddrParams paddrparams
 
   let initmsg = FFI.Initmsg
@@ -494,10 +535,7 @@ defaultSocketOpts socket mtu = do
                   , initmsgSinitMaxAttempts = 0
                   , initmsgSinitMaxInitTimeo = 0
                   }
-  debug "setsocketopt: initmsg"
   setSocketOption socket SocketOptions.sctpInitmsg initmsg
-
-  debug "setsocketopt: fragmentInterleave"
   setSocketOption socket SocketOptions.sctpFragmentInterleave (0 :: CInt)
 
   return ()

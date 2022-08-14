@@ -96,7 +96,9 @@ executables:
       - usrsctp
       - network
     source-dirs: app
-
+    ghc-options:
+      - -threaded
+      - -with-rtsopts=-N
 tests:
   tests:
     dependencies:
