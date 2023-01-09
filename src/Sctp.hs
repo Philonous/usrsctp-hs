@@ -8,6 +8,7 @@
 module Sctp
   ( module Sctp
   , module FFI
+  , module Structs
   ) where
 
 import           Control.Concurrent       ( threadDelay, forkIO
@@ -51,8 +52,8 @@ import qualified Network.Socket           as Socket
 import           Network.Socket.Address   (SocketAddress(..))
 
 import qualified FFI
-import           FFI                      (init, initDebug, registerAddress
-                                          , SendvSpa(..))
+import           FFI                      (init, initDebug, registerAddress)
+import           Structs
 
 import           GHC.Exts                 (touch#)
 import           GHC.IO                   (IO (..))
@@ -81,7 +82,7 @@ data GlobalState =
 {-# NOINLINE globalState #-}
 globalState :: GlobalState
 globalState = unsafePerformIO $ do
-  map <- newIORef IMap.empty
+  map <- newIORef (IMap.empty :: IMap.IntMap (Ptr Word8 -> Int -> Word8 -> Word8 -> IO Bool))
   let conSend addr buffer len tos setDf = do
         let addr' = fromIntegral $ ptrToIntPtr addr
         cons <- readIORef map
@@ -187,6 +188,7 @@ recv sock buffsize = go
           go
 
 
+socket :: IO Socket
 socket = do
   receiveFlag <- newEmptyMVar
   sendFlag <- newEmptyMVar
@@ -250,23 +252,18 @@ withRawSocket sock f = do
   touchSocket sock
   return res
 
-
--- | While usrsctp can send data via sockets, this isn't implemented in this
+-- | The "outside" part to the "inside" of the socket
+--
+-- While usrsctp can send data via sockets, this isn't implemented in this
 -- library. Instead, we rely on usrsctp's ability to use send and receive
 -- callbacks. This also means that we don't care about the IP address of our
 -- peers (they are handled by the underlying transport). Instead connections are
 -- tracked via abstract handlers.
 data Connection =
   Connection
-  { connAddr :: IORef Int
-  , connStop :: IO ()
-  }
+  { connAddr :: IORef Int }
 
---   withRawSocket sock $ \raw ->
-    -- defaultSocketOpts raw (1280 - 8 - 40) -- UDP, IPv6
-
-
-connection send recv recvBufferSize = do
+connection send recvBufferSize = do
   addr <- atomicModifyIORef (globalStateNextAddr globalState) (\x -> (x+1, x))
   debug $ "Addr: " ++ show addr
   FFI.registerAddress $ intPtrToPtr (fromIntegral addr)
@@ -276,24 +273,7 @@ connection send recv recvBufferSize = do
   atomicModifyIORef (globalStateConMap globalState)
     $ \mp -> (IMap.insert addr send mp, ())
 
-  -- Perhaps a more "elegant" solution would be to modify recv so it checks if
-  -- data is available, and if not it calls the lower layer, which might even
-  -- properly block on an fd which the runtime can handle better. But usrsctp
-  -- can generate notifications independently of incoming data and they are
-  -- handed to the user via recv.
-  thread <- async $ forever $
-    Ex.handle (\(e :: Ex.SomeException) -> do
-                  debug $ "Receive thread got exception: " ++ show e
-                  Ex.throwM e
-              )( do
-                   received <- recv buffer recvBufferSize
-                   -- debug $ "raw received: " ++ show received
-                   -- debugPacket "packet= " buffer received
-                   FFI.conninput (intPtrToPtr $ fromIntegral addr)
-                     buffer (fromIntegral received)
-               )
   let stop = do
-        uninterruptibleCancel thread
         atomicModifyIORef (globalStateConMap globalState)
           $ \mp ->(IMap.delete addr mp, ())
 
@@ -301,24 +281,51 @@ connection send recv recvBufferSize = do
   -- Stop the thread when socket goes out of scope
   _ <- mkWeakIORef addrRef stop
   return
-    Connection
-    { connAddr = addrRef
-    , connStop = stop
-    }
+    Connection{ connAddr = addrRef }
 
--- | Create an estalished UDP connection. This is just a helper for simple
--- onto-to-one style connections. Real scenarios are probably more complex.
-simpleUdpConnection localAddr remoteAddr = do
-  udpSocket <- Socket.socket Socket.AF_INET Socket.Datagram Socket.defaultProtocol
-  Socket.bind udpSocket localAddr
-  Socket.connect udpSocket remoteAddr
-  connection (\buf bufsize _ _ -> do
-                 sent <- Socket.sendBuf udpSocket buf bufsize
-                 return $ sent == bufsize
-             )
-    (\buf bufSize -> do
-        Socket.recvBuf udpSocket buf bufSize
-    ) 65507 {- Maximum UDP packet size -}
+conInput :: Connection -> Ptr Word8 -> CSize -> IO ()
+conInput con ptr len = do
+  addr <- readIORef $ connAddr con
+  FFI.conninput (intPtrToPtr $ fromIntegral addr) (castPtr ptr) len
+
+setConOutput con f = do
+  addr <- readIORef $ connAddr con
+  atomicModifyIORef (globalStateConMap globalState)
+          $ \mp ->(IMap.insert addr f mp, ())
+
+-- conRecvThread = do
+--     -- Perhaps a more "elegant" solution would be to modify recv so it checks if
+--   -- data is available, and if not it calls the lower layer, which might even
+--   -- properly block on an fd which the runtime can handle better. But usrsctp
+--   -- can generate notifications independently of incoming data and they are
+--   -- handed to the user via recv.
+--   thread <- async $ forever $
+--     Ex.handle (\(e :: Ex.SomeException) -> do
+--                   debug $ "Receive thread got exception: " ++ show e
+--                   Ex.throwM e
+--               )( do
+--                    received <- recv buffer recvBufferSize
+--                    -- debug $ "raw received: " ++ show received
+--                    -- debugPacket "packet= " buffer received
+--                    FFI.conninput (intPtrToPtr $ fromIntegral addr)
+--                      buffer (fromIntegral received)
+--                )
+--   return _
+
+
+-- -- | Create an estalished UDP connection. This is just a helper for simple
+-- -- onto-to-one style connections. Real scenarios are probably more complex.
+-- simpleUdpConnection localAddr remoteAddr = do
+--   udpSocket <- Socket.socket Socket.AF_INET Socket.Datagram Socket.defaultProtocol
+--   Socket.bind udpSocket localAddr
+--   Socket.connect udpSocket remoteAddr
+--   connection (\buf bufsize _ _ -> do
+--                  sent <- Socket.sendBuf udpSocket buf bufsize
+--                  return $ sent == bufsize
+--              )
+--     (\buf bufSize -> do
+--         Socket.recvBuf udpSocket buf bufSize
+--     ) 65507 {- Maximum UDP packet size -}
 
 -- rcv pull Socket{..} = do
 --   pendingRcvs <- readIORef sockPendingRecvCount

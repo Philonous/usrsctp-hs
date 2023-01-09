@@ -97,11 +97,11 @@ recvTest opts = do
                               size <- Socket.sendBufTo udpSocket buf bufsize remote
                               return $ size == bufsize
                           )
-    (\buf bufSize -> do
-        (len, _) <- Socket.recvBufFrom udpSocket buf bufSize
-        -- debug "<"
-        return len
-    ) 65507 {- Maximum UDP packet size -}
+    -- (\buf bufSize -> do
+    --     (len, _) <- Socket.recvBufFrom udpSocket buf bufSize
+    --     -- debug "<"
+    --     return len -- )
+    65507 {- Maximum UDP packet size -}
 
   debug "connect"
   socket <- Sctp.socket
