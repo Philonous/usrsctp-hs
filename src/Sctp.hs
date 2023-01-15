@@ -297,6 +297,8 @@ conInput con ptr len = do
   addr <- readIORef $ connAddr con
   FFI.conninput (intPtrToPtr $ fromIntegral addr) (castPtr ptr) len
 
+setConOutput :: Connection
+             -> (Ptr Word8 -> Int -> Word8 -> Word8 -> IO Bool) -> IO ()
 setConOutput con f = do
   addr <- readIORef $ connAddr con
   atomicModifyIORef (globalStateConMap globalState)
