@@ -33,7 +33,6 @@ import           Foreign.C
 import           Foreign.C.Error
 import           Foreign.Ptr
 import           System.Exit
-import           System.IO
 import           System.IO.Unsafe         (unsafePerformIO)
 
 import           Data.Coerce              (coerce)
@@ -41,7 +40,7 @@ import           Data.IORef
 import           Data.Word
 import qualified Foreign.C.Types          as C
 import           Foreign.ForeignPtr
-import           Foreign.Marshal.Alloc    (allocaBytes, alloca, mallocBytes)
+import           Foreign.Marshal.Alloc    (alloca)
 import           Foreign.Marshal.Utils    (with)
 import           Foreign.Ptr
 import           Foreign.Storable         (poke, peek, sizeOf, Storable)
@@ -52,7 +51,7 @@ import qualified Network.Socket           as Socket
 import           Network.Socket.Address   (SocketAddress(..))
 
 import qualified FFI
-import           FFI                      (init, initDebug, registerAddress)
+import           FFI                      (init, registerAddress)
 import           Structs
 
 import           GHC.Exts                 (touch#)
@@ -73,6 +72,7 @@ data GlobalState =
   GlobalState
   { globalStateConMap :: IORef (IMap.IntMap (Ptr Word8 -> Int -> Word8 -> Word8 -> IO Bool))
   , globalStateNextAddr :: IORef Int
+  , globalStateLogFun :: IORef (ByteString -> IO ())
   }
 
 
@@ -93,14 +93,22 @@ globalState = unsafePerformIO $ do
           Just send -> do
             sentSuccess <- send buffer (fromIntegral len) tos setDf
             return $ if sentSuccess then 0 else 1
-  FFI.init conSend
+  logRef <- newIORef $ \_ -> return ()
+  let logFun bs = do
+        doLog <- readIORef logRef
+        doLog bs
+  FFI.init conSend (Just logFun)
   defaultSettings
   nextAddr <- newIORef 1
   return $
     GlobalState
     { globalStateConMap = map
     , globalStateNextAddr = nextAddr
+    , globalStateLogFun = logRef
     }
+
+setLogFun :: (ByteString -> IO ()) -> IO ()
+setLogFun logFun = writeIORef (globalStateLogFun globalState) logFun
 
 data Socket = Socket
   { -- IORef, because we want to invalidate the socket on close
@@ -132,7 +140,7 @@ debugPacket :: String -> Ptr a -> Int -> IO ()
 debugPacket prefix ptr len = do
   bs <- BS.packCStringLen (castPtr ptr, len)
   unless (BS.length bs == len) $ do
-    hPutStrLn stderr ("packCStringLen exploded, "
+    debug ("packCStringLen exploded, "
       ++ (show $ BS.length bs) ++ " /= " ++ (show len))
     exitFailure
   debug $ prefix ++ case SctpPacket.parse bs of
@@ -263,12 +271,13 @@ data Connection =
   Connection
   { connAddr :: IORef Int }
 
-connection send recvBufferSize = do
+connection :: (Ptr Word8 -> Int -> Word8 -> Word8 -> IO Bool)
+           -> IO Connection
+connection send = do
   addr <- atomicModifyIORef (globalStateNextAddr globalState) (\x -> (x+1, x))
   debug $ "Addr: " ++ show addr
   FFI.registerAddress $ intPtrToPtr (fromIntegral addr)
   -- TODO, threads need to be handled properly
-  buffer <- mallocBytes recvBufferSize
 
   atomicModifyIORef (globalStateConMap globalState)
     $ \mp -> (IMap.insert addr send mp, ())
@@ -354,11 +363,15 @@ connect sock conn port = withRawSocket sock $ \raw -> do
       , sockaddrConnSconnAddr = intPtrToPtr $ fromIntegral addr
       }
 
-debugCont = hPutStr stderr
-
 debug str = do
-  hPutStrLn stderr str
-  hFlush stderr
+  logFun <- readIORef $ globalStateLogFun globalState
+  let txt = Text.pack str
+      txt' =
+        case Text.unsnoc txt of
+          Nothing -> txt
+          Just (_, lst) | lst == '\n' -> txt
+                        | otherwise -> txt <> "\n"
+  logFun $ Text.encodeUtf8 $ txt'
 
 data Reliability = Reliable
                  | ReXMit Int -- Try X retransmissions
@@ -505,8 +518,9 @@ subscribeEvent socket (FFI.EventType event) =
                   , eventSeType = event
                   }
 
-defaultSocketOpts :: FFI.Socket -> Word32 -> IO ()
-defaultSocketOpts socket mtu = do
+defaultSocketOpts :: Socket -> Word32 -> IO ()
+defaultSocketOpts socket' mtu = do
+  socket <- readIORef $ sockRaw socket'
   FFI.setNonBlocking socket True
   -- SCTP must stop sending after the lower layer is shut down, so disable
   -- linger

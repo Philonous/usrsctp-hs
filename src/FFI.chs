@@ -8,6 +8,9 @@ module FFI
 where
 
 import           Data.Bits              ((.|.))
+import           Data.ByteString        (ByteString)
+import qualified Data.ByteString        as BS
+import qualified Data.ByteString.Unsafe as BS
 import           Data.Coerce
 import qualified Data.List              as List
 import           Data.Word
@@ -30,33 +33,42 @@ import           Structs
 
 
 type WriteCallback = Ptr () -> Ptr Word8 -> CSize -> Word8 -> Word8 -> IO CSize
-
-foreign import ccall safe "Bindings.chs.h usrsctp_init"
-  usrsctp_init :: CUShort -> FunPtr WriteCallback -> FunPtr () -> IO ()
+type LogFun = Ptr CChar -> IO ()
 
 foreign import ccall safe "init_debug"
-  usrsctp_init_debug :: CUShort -> FunPtr WriteCallback -> IO ()
+  usrsctp_init :: CUShort -> FunPtr WriteCallback -> FunPtr LogFun -> IO ()
 
 foreign import ccall "wrapper"
   mkWriteCallback :: WriteCallback -> IO (FunPtr WriteCallback)
 
 
+foreign import ccall "wrapper"
+  mkLogFun :: LogFun -> IO (FunPtr LogFun)
+
+
+
 -- NB: The conn-send callback MUST return 0 on successful send, NOT the number
 -- ob bytes sent! Any other value is interpreted as an error
-init :: FFI.WriteCallback -> IO ()
-init callback = do
+init :: FFI.WriteCallback -> Maybe (ByteString -> IO ()) -> IO ()
+init callback mbLogFun = do
   callbackPtr <- mkWriteCallback callback
+  logFunPtr <-
+    case mbLogFun of
+      Nothing -> return nullFunPtr
+      Just logFun -> do
+        let logFun' ptr = BS.packCString ptr >>= logFun
+        mkLogFun logFun'
   usrsctp_init
     0 -- Set UDP port to 0 to disable UDP encapsulation
     callbackPtr
-    nullFunPtr
+    logFunPtr
 
-initDebug :: FFI.WriteCallback -> IO ()
-initDebug callback = do
-  callbackPtr <- mkWriteCallback callback
-  usrsctp_init_debug
-    0 -- Set UDP port to 0 to disable UDP encapsulation
-    callbackPtr
+-- initDebug :: FFI.WriteCallback -> IO ()
+-- initDebug callback = do
+--   callbackPtr <- mkWriteCallback callback
+--   usrsctp_init_debug
+--     0 -- Set UDP port to 0 to disable UDP encapsulation
+--     callbackPtr
 
 
 conninput :: Ptr () -- ^ This pointer is only used to identify the connection and

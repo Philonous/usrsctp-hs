@@ -20,6 +20,8 @@ import qualified Data.Text             as Text
 import qualified Data.Text.Encoding    as Text
 import           Data.Tuple            (swap)
 import           Foreign.Ptr           (intPtrToPtr)
+import           Foreign.Ptr           (castPtr)
+import           Foreign.Marshal.Alloc (allocaBytes)
 import           System.Console.GetOpt
 import           System.Environment
 import           System.Exit
@@ -78,9 +80,11 @@ options = do
 
 runMain :: IO ()
 runMain = do
+  Sctp.setLogFun (BS.hPutStr stderr)
+  Sctp.defaultSettings
   recvTest =<< options
 
-debugCont = Sctp.debugCont
+-- debugCont = Sctp.debugCont
 
 debug = Sctp.debug
 
@@ -94,17 +98,22 @@ recvTest opts = do
   Socket.bind udpSocket local
   conn <- Sctp.connection (\buf bufsize _ _ -> do
                               -- debug ">"
+                              bs <- BS.packCStringLen (castPtr buf, bufsize)
+                              debug $ "Sending " <> show bs
                               size <- Socket.sendBufTo udpSocket buf bufsize remote
                               return $ size == bufsize
                           )
-    -- (\buf bufSize -> do
-    --     (len, _) <- Socket.recvBufFrom udpSocket buf bufSize
-    --     -- debug "<"
-    --     return len -- )
-    65507 {- Maximum UDP packet size -}
+
+  let bufSize = 65507 {- Maximum UDP packet size -}
+  forkIO $ allocaBytes bufSize $ \buf ->
+    forever $ do
+        (len, _) <- Socket.recvBufFrom udpSocket buf bufSize
+        debug "<"
+        Sctp.conInput conn buf (fromIntegral len)
 
   debug "connect"
   socket <- Sctp.socket
+  Sctp.defaultSocketOpts socket 1500
   Sctp.bind socket conn 5000
   Sctp.connect socket conn 5000
   when (optionSend opts) $ void . forkIO $ do
@@ -147,8 +156,6 @@ doSend options socket = do
       case (optionCount options) of
         Just m | m <= n -> return ()
         _ -> go (n+1)
-
-
 
 
 -- sendTest = do
